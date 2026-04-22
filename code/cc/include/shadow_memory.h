@@ -180,6 +180,8 @@ private:
 
     // ---- 成员变量 ----
     ShadowMemoryConfig config_;
+    uint32_t           page_size_;
+    uint32_t           page_size_mask_;
     std::unordered_map<PageId_t, Page> pages_;
 
     // 统计

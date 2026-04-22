@@ -3,6 +3,7 @@
 // SystemVerilog DPI-C 外部接口
 // ============================================================
 #include "transaction_manager.h"
+#include "utils.h"
 #include <cstring>
 
 static TransactionManager* g_mgr = nullptr;

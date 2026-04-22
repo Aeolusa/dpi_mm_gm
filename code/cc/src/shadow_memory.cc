@@ -48,6 +48,9 @@ ShadowMemory::ShadowMemory(const ShadowMemoryConfig& cfg)
     if (config_.max_write_history == 0) {
         config_.max_write_history = 1; // 至少保留1条
     }
+
+    page_size_      = 1u << config_.page_size_bits;
+    page_size_mask_ = page_size_ - 1;
 }
 
 ShadowMemory::~ShadowMemory() {
@@ -63,8 +66,7 @@ ShadowMemory::PageId_t ShadowMemory::addr_to_page_id(Addr_t addr) const {
 }
 
 uint32_t ShadowMemory::addr_to_page_offset(Addr_t addr) const {
-    uint32_t page_size = 1u << config_.page_size_bits;
-    return static_cast<uint32_t>(addr & (page_size - 1));
+    return static_cast<uint32_t>(addr & page_size_mask_);
 }
 
 bool ShadowMemory::validate_addr(Addr_t addr) const {
@@ -84,9 +86,8 @@ ShadowMemory::Page& ShadowMemory::get_or_create_page(PageId_t page_id) {
     }
 
     // 创建新page，预分配所有ByteSlot
-    uint32_t page_size = 1u << config_.page_size_bits;
     Page new_page;
-    new_page.slots.resize(page_size);  // 默认构造：value=0, initialized=false
+    new_page.slots.resize(page_size_);  // 默认构造：value=0, initialized=false
     new_page.any_written = false;
 
     auto [insert_it, _] = pages_.emplace(page_id, std::move(new_page));
@@ -538,15 +539,14 @@ std::string ShadowMemory::dump_write_history(Addr_t addr) const {
 // ============================================================
 std::string ShadowMemory::dump_stats() const {
     std::ostringstream oss;
-    uint32_t page_size = 1u << config_.page_size_bits;
 
     oss << "╔══════════════════════════════════════════╗\n"
         << "║       ShadowMemory Statistics            ║\n"
         << "╠══════════════════════════════════════════╣\n"
-        << "║  Page size          : " << std::setw(16) << page_size << " B ║\n"
+        << "║  Page size          : " << std::setw(16) << page_size_ << " B ║\n"
         << "║  Pages allocated    : " << std::setw(16) << get_total_pages_allocated() << "   ║\n"
         << "║  Memory footprint   : " << std::setw(16)
-        << (get_total_pages_allocated() * page_size) << " B ║\n"
+        << (get_total_pages_allocated() * page_size_) << " B ║\n"
         << "║  Bytes written      : " << std::setw(16) << get_total_written_bytes() << "   ║\n"
         << "║  Total write ops    : " << std::setw(16) << total_write_ops_ << "   ║\n"
         << "║  Total read ops     : " << std::setw(16) << total_read_ops_ << "   ║\n"
@@ -571,10 +571,9 @@ void ShadowMemory::for_each_written_byte(
     for (const auto& [page_id, page] : pages_) {
         if (!page.any_written) continue;
 
-        uint32_t page_size = 1u << config_.page_size_bits;
         Addr_t page_base = static_cast<Addr_t>(page_id) << config_.page_size_bits;
 
-        for (uint32_t offset = 0; offset < page_size; ++offset) {
+        for (uint32_t offset = 0; offset < page_size_; ++offset) {
             const ByteSlot& slot = page.slots[offset];
             if (slot.initialized) {
                 visitor(page_base + offset, slot);
