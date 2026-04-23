@@ -18,7 +18,9 @@ protected:
         Transaction txn;
         txn.txn_id     = id;
         txn.global_seq = seq;
-        txn.master_id  = mst;
+        txn.src_id     = mst;
+        txn.tgt_id     = 0;
+        txn.dbid       = 0;
         txn.type       = TxnType::WRITE;
         txn.addr       = addr;
         txn.size       = static_cast<uint32_t>(data.size());
@@ -37,7 +39,9 @@ protected:
         Transaction txn;
         txn.txn_id     = id;
         txn.global_seq = seq;
-        txn.master_id  = mst;
+        txn.src_id     = mst;
+        txn.tgt_id     = 0;
+        txn.dbid       = 0;
         txn.type       = TxnType::READ;
         txn.addr       = addr;
         txn.size       = static_cast<uint32_t>(data.size());

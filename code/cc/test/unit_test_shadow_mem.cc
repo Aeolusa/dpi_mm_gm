@@ -17,13 +17,15 @@ protected:
     std::unique_ptr<ShadowMemory> mem_;
 
     // 辅助：构造简单Transaction
-    Transaction make_write_txn(MstId_t mst, Addr_t addr,
+    Transaction make_write_txn(uint32_t src_id, Addr_t addr,
                                Data_t data, Timestamp_t time,
                                SeqNum_t seq, TxnId_t id) {
         Transaction txn;
         txn.txn_id     = id;
         txn.global_seq = seq;
-        txn.master_id  = mst;
+        txn.src_id     = src_id;
+        txn.tgt_id     = 0;
+        txn.dbid       = 0;
         txn.type       = TxnType::WRITE;
         txn.addr       = addr;
         txn.size       = static_cast<uint32_t>(data.size());
@@ -39,7 +41,7 @@ protected:
 
 // ---- 测试1：基本写读 ----
 TEST_F(ShadowMemoryTest, BasicWriteRead) {
-    mem_->write_byte(0x1000, 0xAB, /*mst*/0, /*txn*/1, /*seq*/0, /*time*/100);
+    mem_->write(0x1000, {0xAB}, {true}, 0, 0, 1, 0, 100);
 
     auto val = mem_->read_byte(0x1000);
     ASSERT_TRUE(val.has_value());
@@ -54,18 +56,18 @@ TEST_F(ShadowMemoryTest, ReadUnwrittenReturnsNullopt) {
 
 // ---- 测试3：多次写同一地址，保留历史 ----
 TEST_F(ShadowMemoryTest, WriteHistoryTracking) {
-    mem_->write_byte(0x1000, 0x11, 0, 1, 0, 100);
-    mem_->write_byte(0x1000, 0x22, 1, 2, 1, 200);
-    mem_->write_byte(0x1000, 0x33, 0, 3, 2, 300);
+    mem_->write(0x1000, {0x11}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0x1000, {0x22}, {true}, 1, 0, 2, 1, 200);
+    mem_->write(0x1000, {0x33}, {true}, 0, 0, 3, 2, 300);
 
     auto val = mem_->read_byte(0x1000);
     EXPECT_EQ(val.value(), 0x33); // 最新值
 
     const auto& hist = mem_->get_write_history(0x1000);
     ASSERT_EQ(hist.size(), 3u);
-    EXPECT_EQ(hist[0].value, 0x11);
-    EXPECT_EQ(hist[1].value, 0x22);
-    EXPECT_EQ(hist[2].value, 0x33);
+    EXPECT_EQ(hist[0].value[0], 0x11);
+    EXPECT_EQ(hist[1].value[0], 0x22);
+    EXPECT_EQ(hist[2].value[0], 0x33);
 }
 
 // ---- 测试4：Byte enable部分写 ----
@@ -73,7 +75,7 @@ TEST_F(ShadowMemoryTest, PartialWriteWithByteEnable) {
     Data_t   data = {0xAA, 0xBB, 0xCC, 0xDD};
     ByteEn_t be   = {true, false, true, false};
 
-    mem_->write(0x1000, data, be, 0, 1, 0, 100);
+    mem_->write(0x1000, data, be, 0, 0, 1, 0, 100);
 
     EXPECT_EQ(mem_->read_byte(0x1000).value(), 0xAA);  // enabled
     EXPECT_FALSE(mem_->has_been_written(0x1001));        // disabled
@@ -83,9 +85,9 @@ TEST_F(ShadowMemoryTest, PartialWriteWithByteEnable) {
 
 // ---- 测试5：时间窗口内可能值 ----
 TEST_F(ShadowMemoryTest, PossibleValuesInTimeWindow) {
-    mem_->write_byte(0x1000, 0x11, 0, 1, 0, 100);
-    mem_->write_byte(0x1000, 0x22, 1, 2, 1, 200);
-    mem_->write_byte(0x1000, 0x33, 0, 3, 2, 300);
+    mem_->write(0x1000, {0x11}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0x1000, {0x22}, {true}, 1, 0, 2, 1, 200);
+    mem_->write(0x1000, {0x33}, {true}, 0, 0, 3, 2, 300);
 
     // 窗口[150, 250]应该包含 0x11(窗口前最后写) 和 0x22(窗口内)
     auto vals = mem_->get_possible_values(0x1000, 150, 250);
@@ -105,10 +107,10 @@ TEST_F(ShadowMemoryTest, WriteFromTransaction) {
     EXPECT_EQ(readback[2], 0xBE);
     EXPECT_EQ(readback[3], 0xEF);
 
-    // 验证写历史中的master_id和txn_id
+    // 验证写历史中的src_id和txn_id
     auto last_wr = mem_->get_last_write(0x2000);
     ASSERT_TRUE(last_wr.has_value());
-    EXPECT_EQ(last_wr->master_id, 0u);
+    EXPECT_EQ(last_wr->src_id, 0u);
     EXPECT_EQ(last_wr->txn_id, 99u);
     EXPECT_EQ(last_wr->global_seq, 10u);
 }
@@ -127,8 +129,8 @@ TEST_F(ShadowMemoryTest, PreloadNoWriteHistory) {
 
 // ---- 测试8：invalidate_range清除数据和历史 ----
 TEST_F(ShadowMemoryTest, InvalidateRange) {
-    mem_->write_byte(0x4000, 0xAA, 0, 1, 0, 100);
-    mem_->write_byte(0x4001, 0xBB, 0, 2, 1, 200);
+    mem_->write(0x4000, {0xAA}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0x4001, {0xBB}, {true}, 0, 0, 2, 1, 200);
 
     EXPECT_TRUE(mem_->has_been_written(0x4000));
     EXPECT_TRUE(mem_->has_been_written(0x4001));
@@ -142,7 +144,7 @@ TEST_F(ShadowMemoryTest, InvalidateRange) {
 
 // ---- 测试9：reset全部清空 ----
 TEST_F(ShadowMemoryTest, ResetClearsEverything) {
-    mem_->write_byte(0x5000, 0xFF, 0, 1, 0, 100);
+    mem_->write(0x5000, {0xFF}, {true}, 0, 0, 1, 0, 100);
     EXPECT_TRUE(mem_->has_been_written(0x5000));
     EXPECT_GT(mem_->get_total_pages_allocated(), 0u);
 
@@ -159,7 +161,7 @@ TEST_F(ShadowMemoryTest, CrossPageBoundary) {
     Data_t data = {0xAA, 0xBB, 0xCC, 0xDD};
     ByteEn_t be = {true, true, true, true};
 
-    mem_->write(cross_addr, data, be, 0, 1, 0, 100);
+    mem_->write(cross_addr, data, be, 0, 0, 1, 0, 100);
 
     EXPECT_EQ(mem_->read_byte(0x0FFE).value(), 0xAA); // page 0
     EXPECT_EQ(mem_->read_byte(0x0FFF).value(), 0xBB); // page 0
@@ -172,9 +174,9 @@ TEST_F(ShadowMemoryTest, CrossPageBoundary) {
 
 // ---- 测试11：get_value_at_time回溯查询 ----
 TEST_F(ShadowMemoryTest, GetValueAtTime) {
-    mem_->write_byte(0x6000, 0x11, 0, 1, 0, 100);
-    mem_->write_byte(0x6000, 0x22, 1, 2, 1, 200);
-    mem_->write_byte(0x6000, 0x33, 0, 3, 2, 300);
+    mem_->write(0x6000, {0x11}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0x6000, {0x22}, {true}, 1, 0, 2, 1, 200);
+    mem_->write(0x6000, {0x33}, {true}, 0, 0, 3, 2, 300);
 
     // 在t=150时，只有第一次写(t=100)已完成
     auto val_150 = mem_->get_value_at_time(0x6000, 150);
@@ -193,8 +195,8 @@ TEST_F(ShadowMemoryTest, GetValueAtTime) {
 
 // ---- 测试12：is_range_written检查 ----
 TEST_F(ShadowMemoryTest, IsRangeWritten) {
-    mem_->write_byte(0x7000, 0xAA, 0, 1, 0, 100);
-    mem_->write_byte(0x7001, 0xBB, 0, 2, 1, 100);
+    mem_->write(0x7000, {0xAA}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0x7001, {0xBB}, {true}, 0, 0, 2, 1, 100);
     // 0x7002未写
 
     EXPECT_TRUE(mem_->is_range_written(0x7000, 2));
@@ -205,22 +207,21 @@ TEST_F(ShadowMemoryTest, IsRangeWritten) {
 TEST_F(ShadowMemoryTest, WriteHistoryRingBufferLimit) {
     // config中max_write_history=8
     for (uint32_t i = 0; i < 20; ++i) {
-        mem_->write_byte(0x8000, static_cast<uint8_t>(i),
-                         0, i, i, 100 + i * 10);
+        mem_->write(0x8000, {static_cast<uint8_t>(i)}, {true}, 0, 0, i, i, 100 + i * 10);
     }
 
     const auto& hist = mem_->get_write_history(0x8000);
     EXPECT_EQ(hist.size(), 8u); // 最多保留8条
 
     // 最旧的应该是第12次写(i=12)
-    EXPECT_EQ(hist.front().value, 12);
+    EXPECT_EQ(hist.front().value[0], 12);
     // 最新的应该是第19次写(i=19)
-    EXPECT_EQ(hist.back().value, 19);
+    EXPECT_EQ(hist.back().value[0], 19);
 }
 
 // ---- 测试14：dump输出不崩溃 ----
 TEST_F(ShadowMemoryTest, DumpDoesNotCrash) {
-    mem_->write_byte(0x9000, 0xAB, 0, 1, 0, 100);
+    mem_->write(0x9000, {0xAB}, {true}, 0, 0, 1, 0, 100);
 
     std::string range_dump = mem_->dump_range(0x9000, 32);
     EXPECT_FALSE(range_dump.empty());
@@ -237,18 +238,22 @@ TEST_F(ShadowMemoryTest, DumpDoesNotCrash) {
     std::cout << stats_dump << std::endl;
 }
 
-// ---- 测试15：for_each_written_byte遍历 ----
-TEST_F(ShadowMemoryTest, ForEachWrittenByte) {
-    mem_->write_byte(0xA000, 0x11, 0, 1, 0, 100);
-    mem_->write_byte(0xA001, 0x22, 0, 2, 1, 200);
-    mem_->write_byte(0xB000, 0x33, 1, 3, 2, 300);
+// ---- 测试15：for_each_written_block遍历 ----
+TEST_F(ShadowMemoryTest, ForEachWrittenBlock) {
+    mem_->write(0xA000, {0x11}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0xA001, {0x22}, {true}, 0, 0, 2, 1, 200);
+    mem_->write(0xB000, {0x33}, {true}, 1, 0, 3, 2, 300);
 
     uint64_t count = 0;
     std::map<Addr_t, uint8_t> collected;
 
-    mem_->for_each_written_byte([&](Addr_t addr, const ByteSlot& slot) {
-        collected[addr] = slot.current_value;
-        count++;
+    mem_->for_each_written_block([&](Addr_t addr, const BlockSlot& slot) {
+        for(int i=0; i<32; ++i) {
+            if(slot.init_mask & (1U<<i)) {
+                collected[addr + i] = slot.current_value[i];
+                count++;
+            }
+        }
     });
 
     EXPECT_EQ(count, 3u);
@@ -259,9 +264,9 @@ TEST_F(ShadowMemoryTest, ForEachWrittenByte) {
 
 // ---- 测试16：read连续区域混合已写和未写byte ----
 TEST_F(ShadowMemoryTest, ReadMixedInitializedRange) {
-    mem_->write_byte(0xC000, 0xAA, 0, 1, 0, 100);
+    mem_->write(0xC000, {0xAA}, {true}, 0, 0, 1, 0, 100);
     // 0xC001 未写
-    mem_->write_byte(0xC002, 0xCC, 0, 2, 1, 200);
+    mem_->write(0xC002, {0xCC}, {true}, 0, 0, 2, 1, 200);
     // 0xC003 未写
 
     Data_t result = mem_->read(0xC000, 4);
@@ -281,10 +286,10 @@ TEST_F(ShadowMemoryTest, ReadAndLogTracksEntries) {
     cfg.track_read_log     = true;  // 启用读日志
     mem_ = std::make_unique<ShadowMemory>(cfg);
 
-    mem_->write_byte(0xD000, 0x55, 0, 1, 0, 100);
-    mem_->write_byte(0xD001, 0x66, 0, 2, 1, 200);
+    mem_->write(0xD000, {0x55}, {true}, 0, 0, 1, 0, 100);
+    mem_->write(0xD001, {0x66}, {true}, 0, 0, 2, 1, 200);
 
-    Data_t result = mem_->read_and_log(0xD000, 2, /*mst*/1, /*txn*/10, /*time*/300);
+    Data_t result = mem_->read_and_log(0xD000, 2, 1, 10, 300);
 
     EXPECT_EQ(result[0], 0x55);
     EXPECT_EQ(result[1], 0x66);

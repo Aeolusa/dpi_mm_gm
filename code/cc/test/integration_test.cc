@@ -2,47 +2,42 @@
 // file: test/integration_test.cc
 // ============================================================
 #include <gtest/gtest.h>
-#include "transaction_manager.h"
+#include "chi_transaction_manager.h"
 
 class IntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // 2 masters, strict mode
-        mgr_ = std::make_unique<TransactionManager>(2, true);
+        // strict mode
+        mgr_ = std::make_unique<ChiTransactionManager>(true);
     }
 
-    std::unique_ptr<TransactionManager> mgr_;
+    std::unique_ptr<ChiTransactionManager> mgr_;
 };
 
 TEST_F(IntegrationTest, NormalWriteReadFlow) {
-    // MST 0 submits write to 0x1000
+    // Req -> Home
+    mgr_->process_txreq_flit(1, 2, 10, 0x1000, 4, 1, 100);
+    
+    // Home -> Req (Rxrsp dbid)
+    mgr_->process_rxrsp_flit(2, 1, 10, 50); // Src=Home, Tgt=Req, txn=10, dbid=50
+    
+    // Req -> Home (Txdat)
     Data_t w_data = {0xDE, 0xAD, 0xBE, 0xEF};
     ByteEn_t w_be(4, true);
-    TxnId_t w_id = mgr_->submit_request(0, TxnType::WRITE, 0x1000, 4, 1, w_data, w_be, 100);
+    mgr_->process_txdat_flit(1, 2, 50, w_data, w_be, 0, 150);
 
-    // Ensure it was assigned id 0
-    EXPECT_EQ(w_id, 0);
-
-    // Complete write
-    auto report_w = mgr_->complete_transaction(0, w_id, {}, 150);
-    EXPECT_EQ(report_w.result, CheckResult::PASS);
-
-    // MST 1 submits read from 0x1000
-    ByteEn_t r_be(4, true);
-    TxnId_t r_id = mgr_->submit_request(1, TxnType::READ, 0x1000, 4, 1, {}, r_be, 200);
-
-    // Provide read response
-    auto report_r = mgr_->complete_transaction(1, r_id, w_data, 250);
-    EXPECT_EQ(report_r.result, CheckResult::PASS);
+    // Read check
+    mgr_->process_read_completed(1, 2, 11, 0x1000, 4, 1, w_data, 200, 250);
+    
+    auto stats = mgr_->get_checker().get_stats();
+    EXPECT_EQ(stats.passes, 1);
+    EXPECT_EQ(stats.errors, 0);
 }
 
 TEST_F(IntegrationTest, ReadErrorFlow) {
-    // MST 0 submits read from unwritten memory 0x2000
-    ByteEn_t r_be(2, true);
-    TxnId_t r_id = mgr_->submit_request(0, TxnType::READ, 0x2000, 2, 1, {}, r_be, 50);
-
     Data_t r_data = {0x99, 0x99};
-    auto report = mgr_->complete_transaction(0, r_id, r_data, 100);
-
-    EXPECT_EQ(report.result, CheckResult::FAIL_NO_PRIOR_WRITE);
+    mgr_->process_read_completed(1, 2, 12, 0x2000, 2, 1, r_data, 50, 100);
+    
+    auto stats = mgr_->get_checker().get_stats();
+    EXPECT_EQ(stats.errors, 1);
 }
