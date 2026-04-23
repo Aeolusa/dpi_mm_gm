@@ -100,14 +100,14 @@ const ShadowMemory::Page* ShadowMemory::get_page(PageId_t page_id) const {
     return &(it->second);
 }
 
-ShadowMemory::ByteSlot& ShadowMemory::get_or_create_slot(Addr_t addr) {
+ByteSlot& ShadowMemory::get_or_create_slot(Addr_t addr) {
     PageId_t page_id = addr_to_page_id(addr);
     uint32_t offset  = addr_to_page_offset(addr);
     Page& page = get_or_create_page(page_id);
     return page.slots[offset];
 }
 
-const ShadowMemory::ByteSlot* ShadowMemory::get_slot(Addr_t addr) const {
+const ByteSlot* ShadowMemory::get_slot(Addr_t addr) const {
     PageId_t page_id = addr_to_page_id(addr);
     const Page* page = get_page(page_id);
     if (!page) return nullptr;
