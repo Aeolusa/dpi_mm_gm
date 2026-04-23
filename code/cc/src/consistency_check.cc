@@ -12,7 +12,7 @@ void ConsistencyChecker::process_write(const Transaction& txn) {
     assert(txn.type == TxnType::WRITE);
     assert(txn.status == TxnStatus::COMPLETED);
 
-    shadow_mem_.write(txn.addr, txn.data, txn.byte_enable, txn);
+    shadow_mem_.write(txn);
 
     // 记录到活跃写集合（用于overlap检测）
     track_active_write(txn);
@@ -100,12 +100,13 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
 
 void ConsistencyChecker::track_active_write(const Transaction& txn) {
     uint32_t total_bytes = txn.size * txn.burst_len;
-    for (uint32_t i = 0; i < total_bytes; ++i) {
-        if (txn.byte_en_at(i)) {
-            auto& q = active_writes_[txn.addr + i];
-            q.push_back(txn);
-            while (q.size() > 4) q.pop_front();
-        }
+    for (uint32_t i = 0; i < total_bytes; i += BLOCK_SIZE) {
+        // Just track the block addresses covered by this write. 
+        // Note: For partial blocks, any write to the block registers as a block write.
+        Addr_t block_addr = (txn.addr + i) & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+        auto& q = active_writes_[block_addr];
+        q.push_back(txn);
+        while (q.size() > 4) q.pop_front();
     }
 }
 
@@ -113,7 +114,8 @@ std::vector<Transaction> ConsistencyChecker::find_overlapping_writes(
     Addr_t addr, Timestamp_t read_time) const
 {
     std::vector<Transaction> result;
-    auto it = active_writes_.find(addr);
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    auto it = active_writes_.find(block_addr);
     if (it == active_writes_.end()) return result;
 
     for (const auto& wr : it->second) {
@@ -137,11 +139,7 @@ std::string ConsistencyChecker::format_error(const CheckReport& rpt) const {
         << (int)rpt.actual << "\n"
         << "  Write History:";
     for (const auto& wr : rpt.related_writes) {
-        oss << "\n    [SEQ=" << std::dec << wr.global_seq
-            << " MST" << wr.master_id
-            << " TXN#" << wr.txn_id
-            << " val=0x" << std::hex << (int)wr.value
-            << " t=" << std::dec << wr.write_time << "]";
+        oss << "\n    " << wr.to_string();
     }
     return oss.str();
 }

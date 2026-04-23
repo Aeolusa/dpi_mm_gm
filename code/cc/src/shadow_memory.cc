@@ -23,11 +23,13 @@ const std::deque<WriteRecord> ShadowMemory::empty_history_;
 std::string WriteRecord::to_string() const {
     std::ostringstream oss;
     oss << "[WR SEQ=" << global_seq
-        << " MST=" << master_id
+        << " SRC=" << src_id << " TGT=" << tgt_id
         << " TXN=#" << txn_id
-        << " val=0x" << std::hex << std::setw(2) << std::setfill('0')
-        << static_cast<int>(value)
-        << " t=" << std::dec << write_time
+        << " val=";
+    for(int i=0; i<BLOCK_SIZE; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << (int)value[i];
+    }
+    oss << " t=" << std::dec << write_time
         << "]";
     return oss.str();
 }
@@ -51,6 +53,10 @@ ShadowMemory::ShadowMemory(const ShadowMemoryConfig& cfg)
 
     page_size_      = 1u << config_.page_size_bits;
     page_size_mask_ = page_size_ - 1;
+    
+    if (page_size_ < BLOCK_SIZE) {
+        throw std::invalid_argument("ShadowMemory: page_size must be >= BLOCK_SIZE");
+    }
 }
 
 ShadowMemory::~ShadowMemory() {
@@ -66,7 +72,7 @@ ShadowMemory::PageId_t ShadowMemory::addr_to_page_id(Addr_t addr) const {
 }
 
 uint32_t ShadowMemory::addr_to_page_offset(Addr_t addr) const {
-    return static_cast<uint32_t>(addr & page_size_mask_);
+    return static_cast<uint32_t>((addr & page_size_mask_) / BLOCK_SIZE);
 }
 
 bool ShadowMemory::validate_addr(Addr_t addr) const {
@@ -85,9 +91,9 @@ ShadowMemory::Page& ShadowMemory::get_or_create_page(PageId_t page_id) {
         return it->second;
     }
 
-    // 创建新page，预分配所有ByteSlot
+    // 创建新page，预分配所有BlockSlot
     Page new_page;
-    new_page.slots.resize(page_size_);  // 默认构造：value=0, initialized=false
+    new_page.slots.resize(page_size_ / BLOCK_SIZE);
     new_page.any_written = false;
 
     auto [insert_it, _] = pages_.emplace(page_id, std::move(new_page));
@@ -100,55 +106,63 @@ const ShadowMemory::Page* ShadowMemory::get_page(PageId_t page_id) const {
     return &(it->second);
 }
 
-ByteSlot& ShadowMemory::get_or_create_slot(Addr_t addr) {
-    PageId_t page_id = addr_to_page_id(addr);
-    uint32_t offset  = addr_to_page_offset(addr);
+BlockSlot& ShadowMemory::get_or_create_slot(Addr_t block_addr) {
+    PageId_t page_id = addr_to_page_id(block_addr);
+    uint32_t offset  = addr_to_page_offset(block_addr);
     Page& page = get_or_create_page(page_id);
     return page.slots[offset];
 }
 
-const ByteSlot* ShadowMemory::get_slot(Addr_t addr) const {
-    PageId_t page_id = addr_to_page_id(addr);
+const BlockSlot* ShadowMemory::get_slot(Addr_t block_addr) const {
+    PageId_t page_id = addr_to_page_id(block_addr);
     const Page* page = get_page(page_id);
     if (!page) return nullptr;
 
-    uint32_t offset = addr_to_page_offset(addr);
-    const ByteSlot& slot = page->slots[offset];
-    // 即使slot存在，如果从未初始化也返回nullptr
-    if (!slot.initialized) return nullptr;
+    uint32_t offset = addr_to_page_offset(block_addr);
+    const BlockSlot& slot = page->slots[offset];
+    if (slot.init_mask == 0) return nullptr;
     return &slot;
 }
 
 // ============================================================
-// 写操作：单Byte
+// 写操作：Block写入
 // ============================================================
-void ShadowMemory::write_byte(Addr_t      addr,
-                               uint8_t     value,
-                               MstId_t     master_id,
+void ShadowMemory::write_block(Addr_t      block_addr,
+                               const std::array<uint8_t, BLOCK_SIZE>& value,
+                               uint32_t    byte_en_mask,
+                               uint32_t    src_id,
+                               uint32_t    tgt_id,
                                TxnId_t     txn_id,
                                SeqNum_t    global_seq,
                                Timestamp_t write_time)
 {
-    if (!validate_addr(addr)) {
+    if (byte_en_mask == 0) return;
+
+    if (!validate_addr(block_addr)) {
         std::cerr << "[ShadowMemory] WARNING: write to out-of-range address 0x"
-                  << std::hex << addr << std::dec << ", ignored.\n";
+                  << std::hex << block_addr << std::dec << ", ignored.\n";
         return;
     }
 
-    ByteSlot& slot = get_or_create_slot(addr);
+    BlockSlot& slot = get_or_create_slot(block_addr);
 
-    // 更新当前值
-    slot.current_value = value;
-    slot.initialized   = true;
+    // Apply byte_en_mask and merge
+    for (uint32_t i = 0; i < BLOCK_SIZE; ++i) {
+        if (byte_en_mask & (1U << i)) {
+            slot.current_value[i] = value[i];
+            slot.init_mask |= (1U << i);
+        }
+    }
 
     // 标记page为已写
-    PageId_t page_id = addr_to_page_id(addr);
+    PageId_t page_id = addr_to_page_id(block_addr);
     pages_[page_id].any_written = true;
 
     // 构造写记录
     WriteRecord rec;
-    rec.value      = value;
-    rec.master_id  = master_id;
+    rec.value      = slot.current_value; // Store the merged value!
+    rec.src_id     = src_id;
+    rec.tgt_id     = tgt_id;
     rec.txn_id     = txn_id;
     rec.global_seq = global_seq;
     rec.write_time = write_time;
@@ -168,28 +182,39 @@ void ShadowMemory::write_byte(Addr_t      addr,
 void ShadowMemory::write(Addr_t          base_addr,
                           const Data_t&   data,
                           const ByteEn_t& byte_en,
-                          MstId_t         master_id,
+                          uint32_t        src_id,
+                          uint32_t        tgt_id,
                           TxnId_t         txn_id,
                           SeqNum_t        global_seq,
                           Timestamp_t     write_time)
 {
     if (data.empty()) return;
 
-    for (size_t i = 0; i < data.size(); ++i) {
-        // 检查byte enable：如果byte_en为空则默认全使能
-        bool enabled = true;
-        if (!byte_en.empty()) {
-            if (i < byte_en.size()) {
-                enabled = byte_en[i];
-            } else {
-                enabled = false; // 超出byte_en范围的byte不写
+    Addr_t current_addr = base_addr;
+    uint32_t data_offset = 0;
+    
+    while (data_offset < data.size()) {
+        Addr_t block_addr = current_addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+        uint32_t block_offset = current_addr & (BLOCK_SIZE - 1);
+        
+        std::array<uint8_t, BLOCK_SIZE> block_val = {0};
+        uint32_t block_en_mask = 0;
+        
+        while (data_offset < data.size() && block_offset < BLOCK_SIZE) {
+            bool enabled = true;
+            if (!byte_en.empty()) {
+                enabled = (data_offset < byte_en.size()) ? byte_en[data_offset] : false;
             }
+            if (enabled) {
+                block_val[block_offset] = data[data_offset];
+                block_en_mask |= (1U << block_offset);
+            }
+            data_offset++;
+            current_addr++;
+            block_offset++;
         }
-
-        if (!enabled) continue;
-
-        write_byte(base_addr + i, data[i],
-                   master_id, txn_id, global_seq, write_time);
+        
+        write_block(block_addr, block_val, block_en_mask, src_id, tgt_id, txn_id, global_seq, write_time);
     }
 
     total_bytes_written_ += data.size();
@@ -205,7 +230,8 @@ void ShadowMemory::write(const Transaction& txn) {
     write(txn.addr,
           txn.data,
           txn.byte_enable,
-          txn.master_id,
+          txn.src_id,
+          txn.tgt_id,
           txn.txn_id,
           txn.global_seq,
           txn.resp_time);
@@ -215,9 +241,11 @@ void ShadowMemory::write(const Transaction& txn) {
 // 读操作：单Byte
 // ============================================================
 std::optional<uint8_t> ShadowMemory::read_byte(Addr_t addr) const {
-    const ByteSlot* slot = get_slot(addr);
-    if (!slot) return std::nullopt;
-    return slot->current_value;
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    uint32_t offset = addr & (BLOCK_SIZE - 1);
+    const BlockSlot* slot = get_slot(block_addr);
+    if (!slot || !(slot->init_mask & (1U << offset))) return std::nullopt;
+    return slot->current_value[offset];
 }
 
 // ============================================================
@@ -228,12 +256,8 @@ Data_t ShadowMemory::read(Addr_t base_addr, uint32_t len) const {
 
     for (uint32_t i = 0; i < len; ++i) {
         Addr_t addr = base_addr + i;
-        const ByteSlot* slot = get_slot(addr);
-        if (slot) {
-            result[i] = slot->current_value;
-        } else {
-            result[i] = config_.default_init_value;
-        }
+        auto val = read_byte(addr);
+        result[i] = val.has_value() ? val.value() : config_.default_init_value;
     }
 
     return result;
@@ -271,7 +295,8 @@ Data_t ShadowMemory::read_and_log(Addr_t      base_addr,
 // 写历史查询：获取完整写历史
 // ============================================================
 const std::deque<WriteRecord>& ShadowMemory::get_write_history(Addr_t addr) const {
-    const ByteSlot* slot = get_slot(addr);
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    const BlockSlot* slot = get_slot(block_addr);
     if (!slot) return empty_history_;
     return slot->write_history;
 }
@@ -280,30 +305,25 @@ const std::deque<WriteRecord>& ShadowMemory::get_write_history(Addr_t addr) cons
 // 写历史查询：获取最后一次写记录
 // ============================================================
 std::optional<WriteRecord> ShadowMemory::get_last_write(Addr_t addr) const {
-    const ByteSlot* slot = get_slot(addr);
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    const BlockSlot* slot = get_slot(block_addr);
     if (!slot || slot->write_history.empty()) return std::nullopt;
     return slot->write_history.back();
 }
 
 // ============================================================
 // 写历史查询：时间窗口内所有可能值
-// 用于overlap场景：读发生时可能看到窗口内任意一次写的值
-//
-// 逻辑说明：
-//   从写历史中倒序遍历，收集所有 write_time 落在
-//   [window_start, window_end] 区间内的写值。
-//   同时，也包含窗口之前最后一次写的值（即"旧值"），
-//   因为读可能在新写生效之前就完成了。
 // ============================================================
 std::vector<uint8_t> ShadowMemory::get_possible_values(Addr_t      addr,
                                                         Timestamp_t window_start,
                                                         Timestamp_t window_end) const
 {
     std::vector<uint8_t> candidates;
-    const ByteSlot* slot = get_slot(addr);
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    uint32_t offset = addr & (BLOCK_SIZE - 1);
+    const BlockSlot* slot = get_slot(block_addr);
 
-    if (!slot || slot->write_history.empty()) {
-        // 从未被写过，唯一可能值是默认初始值
+    if (!slot || slot->write_history.empty() || !(slot->init_mask & (1U << offset))) {
         candidates.push_back(config_.default_init_value);
         return candidates;
     }
@@ -314,25 +334,21 @@ std::vector<uint8_t> ShadowMemory::get_possible_values(Addr_t      addr,
     // 从最新到最旧遍历
     for (auto it = hist.rbegin(); it != hist.rend(); ++it) {
         if (it->write_time <= window_end && it->write_time >= window_start) {
-            // 写落在窗口内 → 读可能看到这个值
-            candidates.push_back(it->value);
+            candidates.push_back(it->value[offset]);
         } else if (it->write_time < window_start) {
-            // 窗口之前的最后一次写 → 读也可能看到这个"旧值"
             if (!found_pre_window) {
-                candidates.push_back(it->value);
+                candidates.push_back(it->value[offset]);
                 found_pre_window = true;
             }
-            break; // 更早的写不可能被看到
+            break; 
         }
-        // write_time > window_end 的写：发生在读之后，跳过
     }
 
-    // 去重（不同写可能写了相同的值）
+    // 去重
     std::sort(candidates.begin(), candidates.end());
     candidates.erase(std::unique(candidates.begin(), candidates.end()),
                      candidates.end());
 
-    // 如果完全没找到任何候选（不应该发生，但防御性编程）
     if (candidates.empty()) {
         candidates.push_back(config_.default_init_value);
     }
@@ -342,32 +358,34 @@ std::vector<uint8_t> ShadowMemory::get_possible_values(Addr_t      addr,
 
 // ============================================================
 // 写历史查询：某时刻之前的最新值
-// 用途：回溯某个时间点memory应该是什么值
 // ============================================================
 std::optional<uint8_t> ShadowMemory::get_value_at_time(Addr_t addr,
                                                         Timestamp_t time) const
 {
-    const ByteSlot* slot = get_slot(addr);
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    uint32_t offset = addr & (BLOCK_SIZE - 1);
+    const BlockSlot* slot = get_slot(block_addr);
     if (!slot || slot->write_history.empty()) return std::nullopt;
 
     const auto& hist = slot->write_history;
 
-    // 从最新到最旧遍历，找第一个 write_time <= time 的记录
     for (auto it = hist.rbegin(); it != hist.rend(); ++it) {
         if (it->write_time <= time) {
-            return it->value;
+            return it->value[offset];
         }
     }
 
-    return std::nullopt; // 所有写都发生在time之后
+    return std::nullopt; 
 }
 
 // ============================================================
 // 状态查询
 // ============================================================
 bool ShadowMemory::has_been_written(Addr_t addr) const {
-    const ByteSlot* slot = get_slot(addr);
-    return (slot != nullptr); // get_slot已检查initialized
+    Addr_t block_addr = addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
+    uint32_t offset = addr & (BLOCK_SIZE - 1);
+    const BlockSlot* slot = get_slot(block_addr);
+    return (slot != nullptr && (slot->init_mask & (1U << offset)));
 }
 
 bool ShadowMemory::is_range_written(Addr_t base_addr, uint32_t len) const {
@@ -384,7 +402,11 @@ uint64_t ShadowMemory::get_total_written_bytes() const {
     for (const auto& [page_id, page] : pages_) {
         if (!page.any_written) continue;
         for (const auto& slot : page.slots) {
-            if (slot.initialized) count++;
+            uint32_t mask = slot.init_mask;
+            while(mask) {
+                count += mask & 1;
+                mask >>= 1;
+            }
         }
     }
     return count;
@@ -395,8 +417,7 @@ uint64_t ShadowMemory::get_total_pages_allocated() const {
 }
 
 // ============================================================
-// 区域操作：预加载数据（模拟firmware预置）
-// 不产生写历史记录，仅设置初始值
+// 区域操作：预加载数据
 // ============================================================
 void ShadowMemory::preload(Addr_t base_addr, const Data_t& data) {
     for (size_t i = 0; i < data.size(); ++i) {
@@ -408,10 +429,9 @@ void ShadowMemory::preload(Addr_t base_addr, const Data_t& data) {
             continue;
         }
 
-        ByteSlot& slot = get_or_create_slot(addr);
-        slot.current_value = data[i];
-        slot.initialized   = true;
-        // 注意：preload不追加write_history，区别于正常write
+        BlockSlot& slot = get_or_create_slot(addr & ~(static_cast<Addr_t>(BLOCK_SIZE - 1)));
+        slot.current_value[addr & (BLOCK_SIZE - 1)] = data[i];
+        slot.init_mask |= (1U << (addr & (BLOCK_SIZE - 1)));
 
         PageId_t page_id = addr_to_page_id(addr);
         pages_[page_id].any_written = true;
@@ -430,9 +450,11 @@ void ShadowMemory::invalidate_range(Addr_t base_addr, uint32_t len) {
         auto it = pages_.find(page_id);
         if (it == pages_.end()) continue;
 
-        ByteSlot& slot = it->second.slots[offset];
-        slot.current_value = config_.default_init_value;
-        slot.initialized   = false;
+        BlockSlot& slot = it->second.slots[offset];
+        slot.current_value[addr & (BLOCK_SIZE - 1)] = config_.default_init_value;
+        slot.init_mask &= ~(1U << (addr & (BLOCK_SIZE - 1)));
+        // Note: write_history cannot be partially cleared easily per byte. 
+        // We will just clear the whole history for the block if this is called.
         slot.write_history.clear();
     }
 }
@@ -450,8 +472,6 @@ void ShadowMemory::reset() {
 
 // ============================================================
 // 调试：dump某地址范围的当前值（hex格式）
-// 输出格式类似hexdump：
-//   0x00001000: 01 02 03 04 05 06 07 08  09 0A 0B 0C 0D 0E 0F 10
 // ============================================================
 std::string ShadowMemory::dump_range(Addr_t base_addr, uint32_t len) const {
     std::ostringstream oss;
@@ -561,10 +581,10 @@ std::string ShadowMemory::dump_stats() const {
 }
 
 // ============================================================
-// 遍历所有已写byte（用于post-sim分析）
+// 遍历所有已写Block
 // ============================================================
-void ShadowMemory::for_each_written_byte(
-    const std::function<void(Addr_t, const ByteSlot&)>& visitor) const
+void ShadowMemory::for_each_written_block(
+    const std::function<void(Addr_t, const BlockSlot&)>& visitor) const
 {
     if (!visitor) return;
 
@@ -573,10 +593,10 @@ void ShadowMemory::for_each_written_byte(
 
         Addr_t page_base = static_cast<Addr_t>(page_id) << config_.page_size_bits;
 
-        for (uint32_t offset = 0; offset < page_size_; ++offset) {
-            const ByteSlot& slot = page.slots[offset];
-            if (slot.initialized) {
-                visitor(page_base + offset, slot);
+        for (uint32_t offset = 0; offset < page.slots.size(); ++offset) {
+            const BlockSlot& slot = page.slots[offset];
+            if (slot.init_mask != 0) {
+                visitor(page_base + offset * BLOCK_SIZE, slot);
             }
         }
     }

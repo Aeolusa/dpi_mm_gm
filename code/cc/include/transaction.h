@@ -9,9 +9,10 @@ struct Transaction {
     TxnId_t     txn_id;          // 全局唯一ID（由RefModel分配）
     SeqNum_t    global_seq;      // 全局序列号，用于排序
 
-    // ---- 来源 ----
-    MstId_t     master_id;       // 发起者
-    uint32_t    chi_txn_id;      // CHI协议层的TxnID（可选）
+    // ---- 来源与 CHI 路由 ----
+    uint32_t    src_id;          // 发起者 (Requester)
+    uint32_t    tgt_id;          // 目标 (Home Node)
+    uint32_t    dbid;            // Data Buffer ID (从 rxrsp 获取)
 
     // ---- 事务属性 ----
     TxnType     type;
@@ -40,7 +41,7 @@ struct Transaction {
     std::string to_string() const {
         std::ostringstream oss;
         oss << "[TXN#" << txn_id
-            << " MST" << master_id
+            << " SRC" << src_id << "->TGT" << tgt_id
             << " " << (type == TxnType::WRITE ? "WR" : "RD")
             << " @0x" << std::hex << addr
             << " sz=" << std::dec << size

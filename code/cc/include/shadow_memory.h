@@ -12,11 +12,15 @@
 #include <mutex>
 #include <functional>
 #include <string>
+#include <array>
 
-// ---- 单Byte写记录 ----
+constexpr uint32_t BLOCK_SIZE = 32; // 256-bit flit size
+
+// ---- 单Block写记录 (32-byte) ----
 struct WriteRecord {
-    uint8_t      value;
-    MstId_t      master_id;
+    std::array<uint8_t, BLOCK_SIZE> value;
+    uint32_t     src_id;
+    uint32_t     tgt_id;
     TxnId_t      txn_id;
     SeqNum_t     global_seq;
     Timestamp_t  write_time;      // completion time
@@ -24,10 +28,10 @@ struct WriteRecord {
     std::string  to_string() const;
 };
 
-// ---- 单Byte元信息（聚合当前值 + 写历史） ----
-struct ByteSlot {
-    uint8_t                  current_value = 0x00;
-    bool                     initialized   = false;  // 是否被写过
+// ---- 单Block元信息（聚合当前值 + 写历史） ----
+struct BlockSlot {
+    std::array<uint8_t, BLOCK_SIZE> current_value = {0};
+    uint32_t                 init_mask     = 0;      // 32-bit mask for initialized bytes
     std::deque<WriteRecord>  write_history;
 };
 
@@ -70,21 +74,24 @@ public:
     void write(const Transaction& txn);
 
     // 细粒度：指定地址范围写入
-    void write(Addr_t       base_addr,
+    void write(Addr_t          base_addr,
                const Data_t&   data,
                const ByteEn_t& byte_en,
-               MstId_t      master_id,
-               TxnId_t      txn_id,
-               SeqNum_t     global_seq,
-               Timestamp_t  write_time);
+               uint32_t        src_id,
+               uint32_t        tgt_id,
+               TxnId_t         txn_id,
+               SeqNum_t        global_seq,
+               Timestamp_t     write_time);
 
-    // 单byte写入
-    void write_byte(Addr_t      addr,
-                    uint8_t     value,
-                    MstId_t     master_id,
-                    TxnId_t     txn_id,
-                    SeqNum_t    global_seq,
-                    Timestamp_t write_time);
+    // Block写入
+    void write_block(Addr_t      block_addr,
+                     const std::array<uint8_t, BLOCK_SIZE>& value,
+                     uint32_t    byte_en_mask,
+                     uint32_t    src_id,
+                     uint32_t    tgt_id,
+                     TxnId_t     txn_id,
+                     SeqNum_t    global_seq,
+                     Timestamp_t write_time);
 
     // ---------- 读操作 ----------
     // 读取当前值（单byte）
@@ -141,9 +148,9 @@ public:
     // dump统计信息
     std::string dump_stats() const;
 
-    // 遍历所有已写byte（用于post-sim分析）
-    void for_each_written_byte(
-        const std::function<void(Addr_t, const ByteSlot&)>& visitor) const;
+    // 遍历所有已写Block（用于post-sim分析）
+    void for_each_written_block(
+        const std::function<void(Addr_t, const BlockSlot&)>& visitor) const;
 
     // ---------- 配置访问 ----------
     const ShadowMemoryConfig& get_config() const { return config_; }
@@ -154,14 +161,14 @@ private:
     // page_id = addr >> page_size_bits
     // page内offset = addr & ((1 << page_size_bits) - 1)
     struct Page {
-        std::vector<ByteSlot> slots;   // 固定大小 = 1 << page_size_bits
+        std::vector<BlockSlot> slots;   // 固定大小 = (1 << page_size_bits) / BLOCK_SIZE
         bool any_written = false;
     };
 
     using PageId_t = uint64_t;
 
     PageId_t addr_to_page_id(Addr_t addr) const;
-    uint32_t addr_to_page_offset(Addr_t addr) const;
+    uint32_t addr_to_page_offset(Addr_t addr) const; // 返回的是 Block index
 
     // 获取或创建Page
     Page& get_or_create_page(PageId_t page_id);
@@ -169,11 +176,11 @@ private:
     // 只读获取Page（不创建）
     const Page* get_page(PageId_t page_id) const;
 
-    // 获取ByteSlot引用（写路径）
-    ByteSlot& get_or_create_slot(Addr_t addr);
+    // 获取BlockSlot引用（写路径）
+    BlockSlot& get_or_create_slot(Addr_t block_addr);
 
-    // 只读获取ByteSlot（读路径）
-    const ByteSlot* get_slot(Addr_t addr) const;
+    // 只读获取BlockSlot（读路径）
+    const BlockSlot* get_slot(Addr_t block_addr) const;
 
     // 地址合法性检查
     bool validate_addr(Addr_t addr) const;

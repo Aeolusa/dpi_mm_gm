@@ -9,7 +9,7 @@ include_directories(code/cc/include)
 add_library(refmodel SHARED
     code/cc/src/shadow_memory.cc
     code/cc/src/consistency_check.cc
-    code/cc/src/transaction_manager.cc
+    code/cc/src/chi_transaction_manager.cc
     code/cc/src/utils.cc
     code/cc/src/mm_gm_dpi.cc
 )
