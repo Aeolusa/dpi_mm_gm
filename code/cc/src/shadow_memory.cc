@@ -3,13 +3,13 @@
 // ============================================================
 
 #include "shadow_memory.h"
+#include "logger.h"
 
 #include <cassert>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
 #include <stdexcept>
-#include <iostream>
 #include <cstring>
 
 // ============================================================
@@ -139,8 +139,8 @@ void ShadowMemory::write_block(Addr_t      block_addr,
     if (byte_en_mask == 0) return;
 
     if (!validate_addr(block_addr)) {
-        std::cerr << "[ShadowMemory] WARNING: write to out-of-range address 0x"
-                  << std::hex << block_addr << std::dec << ", ignored.\n";
+        LOG_DEBUG("[ShadowMemory] WARNING: write to out-of-range address 0x"
+                  << std::hex << block_addr << std::dec << ", ignored.\n");
         return;
     }
 
@@ -424,8 +424,8 @@ void ShadowMemory::preload(Addr_t base_addr, const Data_t& data) {
         Addr_t addr = base_addr + i;
 
         if (!validate_addr(addr)) {
-            std::cerr << "[ShadowMemory] WARNING: preload address 0x"
-                      << std::hex << addr << " out of range, skipped.\n";
+            LOG_DEBUG("[ShadowMemory] WARNING: preload address 0x"
+                      << std::hex << addr << " out of range, skipped.\n");
             continue;
         }
 

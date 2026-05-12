@@ -11,6 +11,7 @@ add_library(refmodel SHARED
     code/cc/src/consistency_check.cc
     code/cc/src/chi_transaction_manager.cc
     code/cc/src/utils.cc
+    code/cc/src/logger.cc
     code/cc/src/mm_gm_dpi.cc
 )
 

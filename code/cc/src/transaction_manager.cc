@@ -2,7 +2,7 @@
 // file: src/transaction_manager.cc
 // ============================================================
 #include "transaction_manager.h"
-#include <iostream>
+#include "logger.h"
 #include <iomanip>
 
 TransactionManager::TransactionManager(uint32_t num_masters, bool strict)
@@ -74,9 +74,9 @@ CheckReport TransactionManager::complete_transaction(MstId_t     master_id,
     } else {
         report = checker_.process_read(txn);
         if (report.result != CheckResult::PASS) {
-            std::cerr << "\n========== CONSISTENCY ERROR ==========\n"
+            LOG_ERROR("\n========== CONSISTENCY ERROR ==========\n"
                       << report.message
-                      << "\n=======================================\n";
+                      << "\n=======================================\n");
         }
     }
 
@@ -87,18 +87,20 @@ CheckReport TransactionManager::complete_transaction(MstId_t     master_id,
 
 void TransactionManager::final_report() const {
     auto& s = checker_.get_stats();
-    std::cout << "\n╔═══════════════════════════════════════╗\n"
-              << "║   Memory Consistency Check Summary    ║\n"
-              << "╠═══════════════════════════════════════╣\n"
-              << "║  Total Writes  : " << std::setw(18) << s.total_writes << " ║\n"
-              << "║  Total Reads   : " << std::setw(18) << s.total_reads  << " ║\n"
-              << "║  PASS          : " << std::setw(18) << s.passes       << " ║\n"
-              << "║  ERRORS        : " << std::setw(18) << s.errors       << " ║\n"
-              << "╚═══════════════════════════════════════╝\n";
+    std::ostringstream oss;
+    oss << "\n╔═══════════════════════════════════════╗\n"
+        << "║   Memory Consistency Check Summary    ║\n"
+        << "╠═══════════════════════════════════════╣\n"
+        << "║  Total Writes  : " << std::setw(18) << s.total_writes << " ║\n"
+        << "║  Total Reads   : " << std::setw(18) << s.total_reads  << " ║\n"
+        << "║  PASS          : " << std::setw(18) << s.passes       << " ║\n"
+        << "║  ERRORS        : " << std::setw(18) << s.errors       << " ║\n"
+        << "╚═══════════════════════════════════════╝\n";
     if (s.errors > 0) {
-        std::cerr << "*** TEST FAILED: " << s.errors
-                  << " consistency violation(s) detected ***\n";
+        oss << "*** TEST FAILED: " << s.errors
+            << " consistency violation(s) detected ***\n";
     } else {
-        std::cout << "*** TEST PASSED ***\n";
+        oss << "*** TEST PASSED ***\n";
     }
+    LOG_ALWAYS(oss.str());
 }

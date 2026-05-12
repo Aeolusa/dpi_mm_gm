@@ -3,7 +3,7 @@
 // CHI 事务管理器实现
 // ============================================================
 #include "chi_transaction_manager.h"
-#include <iostream>
+#include "logger.h"
 #include <cstring>
 #include <cassert>
 
@@ -78,13 +78,14 @@ void ChiTransactionManager::finalize_read(ChiOutstandingRead& req,
 
     CheckReport report = checker_.process_read(txn);
     if (report.result != CheckResult::PASS) {
-        std::cerr << "\n" << report.message << "\n";
+        LOG_ERROR("\n" << report.message << "\n");
     }
 }
 
 // ============================================================
 // process_txreq: 由 txreq_flitv 触发
 //   opcode 区分 RdNoSnp / WrNoSnp
+//   secvec: 支持片选，即一个 txreq 可以对应多个 cacheline 的读取
 // ============================================================
 void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
                                            Addr_t addr, uint32_t size,
@@ -98,8 +99,8 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
     if (chi_is_read_opcode(opcode)) {
         // ---- 读请求 ----
         if (outstanding_reads_.count(key)) {
-            std::cerr << "[CHI MGR] WARN: duplicate txreq read "
-                      << "mst=" << mst_idx << " txnid=" << txn_id << "\n";
+            LOG_DEBUG("[CHI MGR] WARN: duplicate txreq read "
+                      << "mst=" << mst_idx << " txnid=" << txn_id << "\n");
         }
         ChiOutstandingRead req{};
         req.key             = key;
@@ -113,8 +114,8 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
     } else if (chi_is_write_opcode(opcode)) {
         // ---- 写请求 ----
         if (outstanding_writes_.count(key)) {
-            std::cerr << "[CHI MGR] WARN: duplicate txreq write "
-                      << "mst=" << mst_idx << " txnid=" << txn_id << "\n";
+            LOG_DEBUG("[CHI MGR] WARN: duplicate txreq write "
+                      << "mst=" << mst_idx << " txnid=" << txn_id << "\n");
         }
         ChiOutstandingWrite req{};
         req.key             = key;
@@ -126,9 +127,9 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
         outstanding_writes_[key] = req;
 
     } else {
-        std::cerr << "[CHI MGR] WARN: unknown txreq opcode=0x"
+        LOG_DEBUG("[CHI MGR] WARN: unknown txreq opcode=0x"
                   << std::hex << opcode << std::dec
-                  << " mst=" << mst_idx << " txnid=" << txn_id << "\n";
+                  << " mst=" << mst_idx << " txnid=" << txn_id << "\n");
     }
 }
 
@@ -145,8 +146,8 @@ void ChiTransactionManager::process_rxrsp_dbid(uint32_t mst_idx,
     MstKey key = {mst_idx, txn_id};
     auto it = outstanding_writes_.find(key);
     if (it == outstanding_writes_.end()) {
-        std::cerr << "[CHI MGR] ERROR: rxrsp cannot find write "
-                  << "mst=" << mst_idx << " txnid=" << txn_id << "\n";
+        LOG_ERROR("[CHI MGR] ERROR: rxrsp cannot find write "
+                  << "mst=" << mst_idx << " txnid=" << txn_id << "\n");
         return;
     }
 
@@ -176,8 +177,8 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
     MstKey dbid_key = {mst_idx, txn_id_as_dbid};
     auto dbid_it = dbid_to_txnid_.find(dbid_key);
     if (dbid_it == dbid_to_txnid_.end()) {
-        std::cerr << "[CHI MGR] ERROR: txdat cannot find dbid mapping "
-                  << "mst=" << mst_idx << " dbid=" << txn_id_as_dbid << "\n";
+        LOG_ERROR("[CHI MGR] ERROR: txdat cannot find dbid mapping "
+                  << "mst=" << mst_idx << " dbid=" << txn_id_as_dbid << "\n");
         return;
     }
 
@@ -185,8 +186,8 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
     MstKey orig_key = {mst_idx, orig_txnid};
     auto req_it = outstanding_writes_.find(orig_key);
     if (req_it == outstanding_writes_.end()) {
-        std::cerr << "[CHI MGR] ERROR: txdat found dbid map but no write "
-                  << "mst=" << mst_idx << " txnid=" << orig_txnid << "\n";
+        LOG_ERROR("[CHI MGR] ERROR: txdat found dbid map but no write "
+                  << "mst=" << mst_idx << " txnid=" << orig_txnid << "\n");
         return;
     }
 
@@ -201,8 +202,8 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
     // 按 dataid[1:0] 确定数据在 128B 缓冲中的偏移
     uint32_t byte_offset = dataid_to_offset(dataid);
     if (byte_offset + CHI_FLIT_BYTES > CHI_CL_BYTES) {
-        std::cerr << "[CHI MGR] ERROR: txdat dataid=" << dataid
-                  << " yields out-of-range offset=" << byte_offset << "\n";
+        LOG_ERROR("[CHI MGR] ERROR: txdat dataid=" << dataid
+                  << " yields out-of-range offset=" << byte_offset << "\n");
         return;
     }
 
@@ -239,8 +240,8 @@ void ChiTransactionManager::process_rxdat(uint32_t mst_idx,
     MstKey key = {mst_idx, txn_id};
     auto it = outstanding_reads_.find(key);
     if (it == outstanding_reads_.end()) {
-        std::cerr << "[CHI MGR] ERROR: rxdat cannot find read "
-                  << "mst=" << mst_idx << " txnid=" << txn_id << "\n";
+        LOG_ERROR("[CHI MGR] ERROR: rxdat cannot find read "
+                  << "mst=" << mst_idx << " txnid=" << txn_id << "\n");
         return;
     }
 
@@ -249,8 +250,8 @@ void ChiTransactionManager::process_rxdat(uint32_t mst_idx,
     // 按 dataid[1:0] 放置数据
     uint32_t byte_offset = dataid_to_offset(dataid);
     if (byte_offset + CHI_FLIT_BYTES > CHI_CL_BYTES) {
-        std::cerr << "[CHI MGR] ERROR: rxdat dataid=" << dataid
-                  << " out-of-range offset=" << byte_offset << "\n";
+        LOG_ERROR("[CHI MGR] ERROR: rxdat dataid=" << dataid
+                  << " out-of-range offset=" << byte_offset << "\n");
         return;
     }
 

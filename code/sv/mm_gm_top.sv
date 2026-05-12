@@ -111,8 +111,18 @@ module mm_gm_top #(
     input logic [BLIT_RXDAT_CHNS-1:0]                   blit_rxdat_flitv
 );
 
-    // ---- 初始化、请求、响应的接口均无变化 ----
-    import "DPI-C" function void refmodel_init(input int strict_mode);
+    // ---- 初始化与日志控制 ----
+    //   strict_mode : 严格模式开关
+    //   log_level   : 0=QUIET, 1=ERROR(默认), 2=INFO, 3=DEBUG
+    //   log_file    : 日志文件路径（空字符串则不写文件）
+    import "DPI-C" function void refmodel_init(
+        input int strict_mode,
+        input int log_level,
+        input string log_file
+    );
+
+    // 运行时动态切换日志级别
+    import "DPI-C" function void refmodel_set_log_level(input int log_level);
 
     bit initial_m1;
     bit initial_m2
@@ -131,7 +141,7 @@ module mm_gm_top #(
 
     always_ff @(posedge clk) begin
         if (!initial_m1 && initial_m2) begin
-            refmodel_init();
+            refmodel_init(1, 1, "");  // strict=1, log_level=ERROR, no log file
         end
     end
 

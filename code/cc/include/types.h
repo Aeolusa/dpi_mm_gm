@@ -51,6 +51,7 @@ inline bool chi_is_write_opcode(int opcode) {
 }
 
 // 从 secvec 计算有效 flit 数 (popcount)
+// secvec only valid in [3:0]
 inline uint32_t secvec_to_flits(uint32_t secvec) {
     return __builtin_popcount(secvec & 0xF);
 }

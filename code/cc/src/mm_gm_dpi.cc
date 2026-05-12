@@ -9,6 +9,7 @@
 //   - NCBWrData.txnid 实际为 dbid（CHI协议规定）
 // ============================================================
 #include "chi_transaction_manager.h"
+#include "logger.h"
 #include "utils.h"
 #include <cstring>
 #include <iostream>
@@ -30,9 +31,47 @@ static void unpack_flit256(const uint32_t* sv_data, uint8_t* out_bytes)
 extern "C" {
 
 // ---- 初始化 ----
-void refmodel_init(int strict_mode) {
+//   strict_mode : 严格模式开关
+//   log_level   : 0=QUIET, 1=ERROR(默认), 2=INFO, 3=DEBUG
+//   log_file    : 日志文件路径（空字符串则不写文件）
+void refmodel_init(int strict_mode, int log_level, const char* log_file) {
+    // 配置日志系统
+    LogLevel lvl = LogLevel::ERROR; // 默认
+    switch (log_level) {
+        case 0:  lvl = LogLevel::QUIET; break;
+        case 1:  lvl = LogLevel::ERROR; break;
+        case 2:  lvl = LogLevel::INFO;  break;
+        case 3:  lvl = LogLevel::DEBUG; break;
+        default: lvl = LogLevel::ERROR; break;
+    }
+    Logger::instance().set_level(lvl);
+
+    // 配置日志文件输出
+    if (log_file && std::strlen(log_file) > 0) {
+        Logger::instance().enable_file_output(std::string(log_file));
+    } else {
+        Logger::instance().disable_file_output();
+    }
+
     if (g_mgr) delete g_mgr;
     g_mgr = new ChiTransactionManager(strict_mode != 0);
+
+    LOG_INFO("[REFMODEL] Initialized: strict=" << strict_mode
+             << " log_level=" << log_level
+             << " log_file=" << (log_file ? log_file : "(none)") << "\n");
+}
+
+// ---- 运行时动态切换日志级别 ----
+void refmodel_set_log_level(int log_level) {
+    LogLevel lvl = LogLevel::ERROR;
+    switch (log_level) {
+        case 0:  lvl = LogLevel::QUIET; break;
+        case 1:  lvl = LogLevel::ERROR; break;
+        case 2:  lvl = LogLevel::INFO;  break;
+        case 3:  lvl = LogLevel::DEBUG; break;
+        default: lvl = LogLevel::ERROR; break;
+    }
+    Logger::instance().set_level(lvl);
 }
 
 // ---- txreq: 读或写请求（opcode 区分） ----
@@ -125,12 +164,15 @@ void dpi_chi_rxdat(int mst_idx, int txnid, int opcode,
 void refmodel_finish() {
     if (g_mgr) {
         auto stats = g_mgr->get_checker().get_stats();
-        std::cout << "\n=== REFMODEL FINISHED ===\n"
-                  << "Total Writes: " << stats.total_writes << "\n"
-                  << "Total Reads : " << stats.total_reads  << "\n"
-                  << "Passes      : " << stats.passes       << "\n"
-                  << "Errors      : " << stats.errors       << "\n"
-                  << "=========================\n";
+        std::ostringstream oss;
+        oss << "\n=== REFMODEL FINISHED ===\n"
+            << "Total Writes: " << stats.total_writes << "\n"
+            << "Total Reads : " << stats.total_reads  << "\n"
+            << "Passes      : " << stats.passes       << "\n"
+            << "Errors      : " << stats.errors       << "\n"
+            << "=========================\n";
+        LOG_ALWAYS(oss.str());
+        Logger::instance().disable_file_output();
         delete g_mgr;
         g_mgr = nullptr;
     }
