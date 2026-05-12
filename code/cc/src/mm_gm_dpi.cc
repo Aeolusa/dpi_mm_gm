@@ -1,6 +1,12 @@
 // ============================================================
 // file: src/mm_gm_dpi.cc
 // SystemVerilog DPI-C 外部接口 (CHI)
+//
+// 新接口说明：
+//   - 所有函数新增 mst_idx 参数，区分不同BFM实例
+//   - 数据通道传入原生 256-bit (svBitVecVal* = uint32_t[8])
+//   - 读写事务均通过 process_txreq 路由，opcode 区分类型
+//   - NCBWrData.txnid 实际为 dbid（CHI协议规定）
 // ============================================================
 #include "chi_transaction_manager.h"
 #include "utils.h"
@@ -8,6 +14,18 @@
 #include <iostream>
 
 static ChiTransactionManager* g_mgr = nullptr;
+
+// 将 SV bit[255:0] (8x uint32_t, little-endian word) 解包为 32 字节数组
+static void unpack_flit256(const uint32_t* sv_data, uint8_t* out_bytes)
+{
+    for (int w = 0; w < 8; ++w) {
+        uint32_t word = sv_data[w];
+        out_bytes[w*4 + 0] = (word      ) & 0xFF;
+        out_bytes[w*4 + 1] = (word >>  8) & 0xFF;
+        out_bytes[w*4 + 2] = (word >> 16) & 0xFF;
+        out_bytes[w*4 + 3] = (word >> 24) & 0xFF;
+    }
+}
 
 extern "C" {
 
@@ -17,73 +35,90 @@ void refmodel_init(int strict_mode) {
     g_mgr = new ChiTransactionManager(strict_mode != 0);
 }
 
-// ---- txreq 收到写请求 ----
-void dpi_chi_txreq_write(int src_id, int tgt_id, int txn_id,
-                         long long addr, int size, int burst_len,
-                         long long req_time)
+// ---- txreq: 读或写请求（opcode 区分） ----
+// SV 侧对应 dpi_chi_txreq_write（BFM统一函数名，opcode区分读写）
+//   mst_idx : BFM实例编号
+//   txnid   : CHI txnid (12-bit, in SV passed as int)
+//   addr    : 54-bit 地址
+//   size    : CHI size 编码 (0..7)
+//   opcode  : 4-bit REQOPCODE
+//   secvec  : 4-bit cacheline 有效段向量
+//   req_time: $time (ns)
+void dpi_chi_txreq(int mst_idx, int txnid, long long addr,
+                   int size, int opcode, int secvec, long long req_time)
 {
     if (!g_mgr) return;
-    g_mgr->process_txreq_flit(src_id, tgt_id, txn_id, addr, size, burst_len, req_time);
+    g_mgr->process_txreq(
+        static_cast<uint32_t>(mst_idx),
+        static_cast<uint32_t>(txnid),
+        static_cast<uint64_t>(addr),
+        static_cast<uint32_t>(size),
+        static_cast<uint32_t>(opcode),
+        static_cast<uint32_t>(secvec),
+        static_cast<uint64_t>(req_time)
+    );
 }
 
-// ---- rxrsp 收到写响应 ----
-void dpi_chi_rxrsp_dbid(int src_id, int tgt_id, int txn_id, int dbid)
+// ---- rxrsp: DBIDResp / CompDBIDResp ----
+//   txnid  : rxrsp.txnid（匹配 txreq.txnid）
+//   opcode : 3-bit RSPOPCODE
+//   dbid   : 12-bit DBID
+void dpi_chi_rxrsp_dbid(int mst_idx, int txnid, int opcode, int dbid)
 {
     if (!g_mgr) return;
-    g_mgr->process_rxrsp_flit(src_id, tgt_id, txn_id, dbid);
+    g_mgr->process_rxrsp_dbid(
+        static_cast<uint32_t>(mst_idx),
+        static_cast<uint32_t>(txnid),
+        static_cast<uint32_t>(opcode),
+        static_cast<uint32_t>(dbid)
+    );
 }
 
-// ---- txdat 收到写数据 ----
-void dpi_chi_txdat(int src_id, int tgt_id, int dbid,
-                   const uint32_t* data_bits, uint32_t byte_en_bits,
-                   int offset, long long resp_time)
+// ---- txdat: NCBWrData（写数据） ----
+//   txnid    : 注意！这里传入的实际是 dbid 值（CHI协议 NCBWrData.txnid = DBID）
+//   opcode   : 2-bit DATOPCODE
+//   dataid   : 4-bit，低2位[1:0]决定在cacheline中的偏移 (dataid*32 bytes)
+//   data     : bit[255:0] → 以 8 x uint32_t 传入 (svBitVecVal)
+//   be       : 32-bit byte enable (bit i → byte i)
+//   data_cnt : SM 专用，表示本次事务总flit数；其他类型传0
+void dpi_chi_txdat(int mst_idx, int txnid, int opcode,
+                   int dataid, const uint32_t* data,
+                   int be, int data_cnt)
 {
     if (!g_mgr) return;
-    
-    // CHI data flit is 256 bits (32 bytes) -> 8 uint32_t
-    Data_t data(32);
-    for (int i = 0; i < 8; ++i) {
-        uint32_t word = data_bits[i];
-        data[i*4 + 0] = word & 0xFF;
-        data[i*4 + 1] = (word >> 8) & 0xFF;
-        data[i*4 + 2] = (word >> 16) & 0xFF;
-        data[i*4 + 3] = (word >> 24) & 0xFF;
-    }
-    
-    // CHI byte enable is 32 bits -> 1 uint32_t
-    ByteEn_t be(32);
-    for (int i = 0; i < 32; ++i) {
-        be[i] = (byte_en_bits & (1U << i)) != 0;
-    }
-
-    g_mgr->process_txdat_flit(src_id, tgt_id, dbid, data, be, offset, resp_time);
+    uint8_t flit_bytes[32];
+    unpack_flit256(data, flit_bytes);
+    g_mgr->process_txdat(
+        static_cast<uint32_t>(mst_idx),
+        static_cast<uint32_t>(txnid),   // 实际为 dbid
+        static_cast<uint32_t>(opcode),
+        static_cast<uint32_t>(dataid),
+        flit_bytes,
+        static_cast<uint32_t>(be),
+        static_cast<uint32_t>(data_cnt)
+    );
 }
 
-// ---- 简化的读取和检查（如果不需要读流程追踪） ----
-int dpi_chi_read_check(int src_id, int tgt_id, int txn_id,
-                       long long addr, int size, int burst_len,
-                       const uint32_t* resp_data_bits,
-                       long long req_time, long long resp_time)
+// ---- rxdat: CompData（读返回数据） ----
+//   txnid    : rxdat.txnid（匹配 txreq.txnid）
+//   dataid   : 决定在cacheline中的偏移
+//   data_cnt : 读流程通常不使用（传0）
+void dpi_chi_rxdat(int mst_idx, int txnid, int opcode,
+                   int dataid, const uint32_t* data,
+                   int be, int data_cnt)
 {
-    if (!g_mgr) return -1;
-    
-    int total_bytes = size * burst_len;
-    Data_t data(total_bytes);
-    int num_words = (total_bytes + 3) / 4;
-    for (int i = 0; i < num_words; ++i) {
-        uint32_t word = resp_data_bits[i];
-        for (int j = 0; j < 4; ++j) {
-            if (i * 4 + j < total_bytes) {
-                data[i * 4 + j] = (word >> (j * 8)) & 0xFF;
-            }
-        }
-    }
-    
-    g_mgr->process_read_completed(src_id, tgt_id, txn_id, addr, size, burst_len, data, req_time, resp_time);
-    
-    // 由于 process_read_completed 内部打印了错误信息，这里简化返回0
-    // 如果你的 SV 环境需要根据返回值决定是否 error，可以修改 process_read_completed 返回 bool
-    return 0;
+    if (!g_mgr) return;
+    uint8_t flit_bytes[32];
+    unpack_flit256(data, flit_bytes);
+    g_mgr->process_rxdat(
+        static_cast<uint32_t>(mst_idx),
+        static_cast<uint32_t>(txnid),
+        static_cast<uint32_t>(opcode),
+        static_cast<uint32_t>(dataid),
+        flit_bytes,
+        static_cast<uint32_t>(be),
+        static_cast<uint32_t>(data_cnt)
+    );
 }
 
 // ---- 仿真结束 ----
@@ -92,9 +127,9 @@ void refmodel_finish() {
         auto stats = g_mgr->get_checker().get_stats();
         std::cout << "\n=== REFMODEL FINISHED ===\n"
                   << "Total Writes: " << stats.total_writes << "\n"
-                  << "Total Reads : " << stats.total_reads << "\n"
-                  << "Passes      : " << stats.passes << "\n"
-                  << "Errors      : " << stats.errors << "\n"
+                  << "Total Reads : " << stats.total_reads  << "\n"
+                  << "Passes      : " << stats.passes       << "\n"
+                  << "Errors      : " << stats.errors       << "\n"
                   << "=========================\n";
         delete g_mgr;
         g_mgr = nullptr;

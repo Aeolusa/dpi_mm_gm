@@ -1,5 +1,12 @@
+// ============================================================
+// file: sv/mm_gm_bfm.sv
+// CHI BFM：监听单个 MST 接口的所有通道 flit
+//   - 通过 MST_IDX 参数区分不同BFM实例
+//   - 所有 DPI 函数新增 mst_idx 参数
+// ============================================================
   
-module mm_gm_top #(
+module mm_gm_bfm #(
+    parameter int  MST_IDX                              = 0,    // BFM 实例编号
     parameter REQ_W                                     = 1,
     parameter TXRSP_CHNS                                = 1,
     parameter TXRSP_W                                   = 1,
@@ -25,7 +32,11 @@ module mm_gm_top #(
     input logic [RXDAT_CHNS-1:0]                        rxdat_flitv           
 );
 
-    import "DPI-C" function void dpi_chi_txreq_write(
+    // ---- DPI-C 函数声明（均新增 mst_idx 参数） ----
+
+    // txreq：读写请求统一入口（opcode 区分 RdNoSnp / WrNoSnp）
+    import "DPI-C" function void dpi_chi_txreq(
+        input int mst_idx,
         input int txnid,
         input longint addr, 
         input int size, 
@@ -34,18 +45,18 @@ module mm_gm_top #(
         input longint req_time
     );
 
+    // rxrsp：DBIDResp / CompDBIDResp
     import "DPI-C" function void dpi_chi_rxrsp_dbid(
+        input int mst_idx,
         input int txnid, 
         input int opcode,
         input int dbid
     );
 
-    // ==========================================
-    // 重构后的高效 Data 传输接口：
-    // ==========================================
-
-    // 发送写数据 flit (原生 256-bit data + 32-bit byte_en)
+    // txdat：发送写数据 NCBWrData
+    //   注意：txnid 字段在 CHI 中实际携带 dbid 值
     import "DPI-C" function void dpi_chi_txdat(
+        input int mst_idx,
         input int txnid,
         input int opcode,
         input int dataid,   
@@ -54,7 +65,9 @@ module mm_gm_top #(
         input int data_cnt
     );
 
+    // rxdat：接收读数据 CompData
     import "DPI-C" function void dpi_chi_rxdat(
+        input int mst_idx,
         input int txnid,
         input int opcode,
         input int dataid,   
@@ -63,6 +76,7 @@ module mm_gm_top #(
         input int data_cnt
     );
 
+    // ---- Flit 域宽参数 ----
     parameter TXNID_W                                   = 12;
     parameter REQOPCODE_W                               = 4;
     parameter SIZE_W                                    = 4;
@@ -74,9 +88,10 @@ module mm_gm_top #(
     parameter DATAID_W                                  = 4;
     parameter BE_W                                      = 32;
 
+    // ---- Flit 结构体定义 ----
     typedef struct packed {
         logic [TXNID_W-1:0]     txnid;
-        logic [OPCODE_W-1:0]    opcode;
+        logic [REQOPCODE_W-1:0] opcode;
         logic [ADDR_W-1:0]      addr;
         logic [SECVEC_W-1:0]    secvec;
         logic [SIZE_W-1:0]      size;
@@ -97,9 +112,10 @@ module mm_gm_top #(
         logic [5:0]             data_cnt;
     } dat_t;
 
+    // ---- Flit 解析函数 ----
     function req_t req2dpi(input logic [REQ_W-1:0] req_flit);
         req_t req;
-        req.txn_id  = req_flit[`REQ_TXNID];
+        req.txnid   = req_flit[`REQ_TXNID];
         req.opcode  = req_flit[`REQ_OPCODE];
         req.addr    = req_flit[`REQ_ADDR];
         req.secvec  = req_flit[`REQ_SECVEC];
@@ -115,7 +131,7 @@ module mm_gm_top #(
         return rsp;
     endfunction
 
-    function dat_t dat2dpi(input logic [TXDAT_W-1:0] dat_flit);
+    function dat_t txdat2dpi(input logic [TXDAT_W-1:0] dat_flit);
         dat_t dat;
         dat.txnid       = dat_flit[`DAT_TXNID];
         dat.opcode      = dat_flit[`DAT_OPCODE];
@@ -126,11 +142,24 @@ module mm_gm_top #(
         return dat;
     endfunction
 
+    function dat_t rxdat2dpi(input logic [RXDAT_W-1:0] dat_flit);
+        dat_t dat;
+        dat.txnid       = dat_flit[`DAT_TXNID];
+        dat.opcode      = dat_flit[`DAT_OPCODE];
+        dat.dataid      = dat_flit[`DAT_DATAID];
+        dat.be          = dat_flit[`DAT_BE];
+        dat.data        = dat_flit[`DAT_DATA];
+        dat.data_cnt    = dat_flit[`DAT_DATA_CNT];
+        return dat;
+    endfunction
+
+    // ---- 中间信号 ----
     req_t txreq;
     rsp_t rxrsp[RXRSP_CHNS-1:0];
     dat_t txdat[TXDAT_CHNS-1:0];
     dat_t rxdat[RXDAT_CHNS-1:0];
 
+    // ---- txreq 解析 ----
     always_comb begin
         txreq = '0;
         if (txreq_flitv) begin
@@ -138,6 +167,7 @@ module mm_gm_top #(
         end
     end
 
+    // ---- rxrsp 解析 & DPI调用 ----
     for (genvar i = 0; i < RXRSP_CHNS; i++) begin
         always_comb begin
             rxrsp[i] = '0;
@@ -148,59 +178,76 @@ module mm_gm_top #(
 
         always_ff @(posedge clk) begin
             if (rxrsp_flitv[i]) begin
-                dpi_chi_rxrsp_dbid(rxrsp[i].txnid, rxrsp[i].opcode, rxrsp[i].dbid);
+                dpi_chi_rxrsp_dbid(
+                    MST_IDX,
+                    rxrsp[i].txnid,
+                    rxrsp[i].opcode,
+                    rxrsp[i].dbid
+                );
             end
         end
     end
 
+    // ---- txdat 解析 & DPI调用（NCBWrData，txnid实际为dbid） ----
     for (genvar i = 0; i < TXDAT_CHNS; i++) begin
         always_comb begin
             txdat[i] = '0;
             if (txdat_flitv[i]) begin
-                txdat[i] = dat2dpi(txdat_flit[i]);
+                txdat[i] = txdat2dpi(txdat_flit[i]);
             end
         end
 
         always_ff @(posedge clk) begin
             if (txdat_flitv[i]) begin
-                dpi_chi_txdat(txdat[i].txnid,
-                              txdat[i].opcode,
-                              txdat[i].dataid,
-                              txdat[i].data,
-                              txdat[i].be,
-                              txdat[i].data_cnt);
+                dpi_chi_txdat(
+                    MST_IDX,
+                    txdat[i].txnid,   // CHI规定：NCBWrData.txnid = DBID
+                    txdat[i].opcode,
+                    txdat[i].dataid,
+                    txdat[i].data,
+                    txdat[i].be,
+                    txdat[i].data_cnt // SM专有：总flit数；其他类型为0
+                );
             end
         end
     end
 
+    // ---- rxdat 解析 & DPI调用（CompData，txnid匹配原始txreq） ----
     for (genvar i = 0; i < RXDAT_CHNS; i++) begin
         always_comb begin
             rxdat[i] = '0;
             if (rxdat_flitv[i]) begin
-                rxdat[i] = dat2dpi(rxdat_flit[i]);
+                rxdat[i] = rxdat2dpi(rxdat_flit[i]);
             end
         end
 
         always_ff @(posedge clk) begin
             if (rxdat_flitv[i]) begin
-                dpi_chi_rxdat(rxdat[i].txnid,
-                              rxdat[i].opcode,
-                              rxdat[i].dataid,
-                              rxdat[i].data,
-                              rxdat[i].be,
-                              rxdat[i].data_cnt);
+                dpi_chi_rxdat(
+                    MST_IDX,
+                    rxdat[i].txnid,
+                    rxdat[i].opcode,
+                    rxdat[i].dataid,
+                    rxdat[i].data,
+                    rxdat[i].be,
+                    rxdat[i].data_cnt
+                );
             end
         end
     end
 
+    // ---- txreq DPI调用（读写统一，opcode区分） ----
     always_ff @(posedge clk) begin
         if (txreq_flitv) begin
-            dpi_chi_txreq_write(txreq.txnid, 
-                                txreq.addr, 
-                                txreq.size, 
-                                txreq.opcode, 
-                                txreq.secvec, 
-                                $time)
+            dpi_chi_txreq(
+                MST_IDX,
+                txreq.txnid, 
+                txreq.addr, 
+                txreq.size, 
+                txreq.opcode, 
+                txreq.secvec, 
+                $time
+            );
         end
     end
 

@@ -25,6 +25,7 @@ protected:
         txn.addr       = addr;
         txn.size       = static_cast<uint32_t>(data.size());
         txn.burst_len  = 1;
+        txn.secvec     = 0xF;  // 测试中默认全段有效
         txn.data       = std::move(data);
         txn.byte_enable.assign(txn.size, true);
         txn.req_time   = req_time;
@@ -46,7 +47,9 @@ protected:
         txn.addr       = addr;
         txn.size       = static_cast<uint32_t>(data.size());
         txn.burst_len  = 1;
+        txn.secvec     = 0xF;  // 测试中默认全段有效
         txn.data       = std::move(data);
+        // 全部 byte_enable=true，表示所有字节都需要检查
         txn.byte_enable.assign(txn.size, true);
         txn.req_time   = req_time;
         txn.resp_time  = resp_time;

@@ -26,11 +26,14 @@ TxnId_t TransactionManager::submit_request(MstId_t      master_id,
     Transaction txn;
     txn.txn_id     = txn_id_counter_++;
     txn.global_seq = 0;  // completion时分配
-    txn.master_id  = master_id;
+    txn.src_id     = master_id;  // mst_idx (BFM实例编号)
+    txn.tgt_id     = 0;
+    txn.dbid       = 0;
     txn.type       = type;
     txn.addr       = addr;
     txn.size       = size;
     txn.burst_len  = burst_len;
+    txn.secvec     = 0;  // TransactionManager不使用secvec，默认全有效
     txn.data       = data;
     txn.byte_enable = byte_en;
     txn.req_time   = req_time;

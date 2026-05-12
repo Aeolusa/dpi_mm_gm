@@ -26,12 +26,17 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
 
     stats_.total_reads++;
 
-    uint32_t total_bytes = txn.size * txn.burst_len;
+    // 固定遍历128字节缓冲，但只检查 byte_enable=true 的字节
+    // （即 secvec 指示的有效段内且 per-flit be 有效的字节）
+    uint32_t total_bytes = static_cast<uint32_t>(txn.data.size());
     CheckReport report;
     report.txn    = txn;
     report.result = CheckResult::PASS;
 
     for (uint32_t i = 0; i < total_bytes; ++i) {
+        // 跳过 secvec 未选中的段（byte_enable 已在 finalize_read 中按 secvec+be 设置）
+        if (!txn.byte_en_at(i)) continue;
+
         Addr_t byte_addr = txn.addr + i;
         uint8_t actual_val = txn.data[i];
 
@@ -53,7 +58,6 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
         // === 场景2：检查是否有overlap写 ===
         auto overlap_writes = find_overlapping_writes(byte_addr, txn.req_time);
         if (!overlap_writes.empty()) {
-            // 宽松检查：读值必须是某一次写的值
             auto possible = shadow_mem_.get_possible_values(
                 byte_addr,
                 txn.req_time - overlap_window_,
@@ -85,7 +89,6 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
             report.fail_addr = byte_addr;
             report.expected  = expected_val;
             report.actual    = actual_val;
-            // 附上写历史帮助debug
             const auto& hist = shadow_mem_.get_write_history(byte_addr);
             report.related_writes.assign(hist.begin(), hist.end());
             report.message = format_error(report);
@@ -99,10 +102,8 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
 }
 
 void ConsistencyChecker::track_active_write(const Transaction& txn) {
-    uint32_t total_bytes = txn.size * txn.burst_len;
-    for (uint32_t i = 0; i < total_bytes; i += BLOCK_SIZE) {
-        // Just track the block addresses covered by this write. 
-        // Note: For partial blocks, any write to the block registers as a block write.
+    // 遍历 128 字节缓冲，按 BLOCK_SIZE(32B) 记录写活跃集合
+    for (uint32_t i = 0; i < CHI_CL_BYTES; i += BLOCK_SIZE) {
         Addr_t block_addr = (txn.addr + i) & ~(static_cast<Addr_t>(BLOCK_SIZE - 1));
         auto& q = active_writes_[block_addr];
         q.push_back(txn);

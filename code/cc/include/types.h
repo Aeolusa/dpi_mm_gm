@@ -29,6 +29,42 @@ using TxnId_t   = uint64_t;       // 全局唯一事务ID
 using Timestamp_t = uint64_t;     // 仿真时间戳（单位：ns or cycle）
 using SeqNum_t  = uint64_t;       // 全局递增序列号
 
+// ---------- CHI 协议常量 ----------
+constexpr uint32_t CHI_FLIT_BYTES = 32;   // 256-bit data flit = 32 bytes
+constexpr uint32_t CHI_MAX_FLITS  = 4;    // 最多4笔 data flit (secvec 4-bit)
+constexpr uint32_t CHI_CL_BYTES   = 128;  // 1024-bit cacheline = 128 bytes
+
+// CHI 请求 opcode (4-bit REQOPCODE)
+enum class ChiReqOpcode : uint8_t {
+    ReadNoSnp      = 0x1,
+    WriteNoSnpFull = 0xC,
+    WriteNoSnpPtl  = 0xD,
+    UNKNOWN        = 0xFF
+};
+
+inline bool chi_is_read_opcode(int opcode) {
+    return opcode == static_cast<int>(ChiReqOpcode::ReadNoSnp);
+}
+inline bool chi_is_write_opcode(int opcode) {
+    return opcode == static_cast<int>(ChiReqOpcode::WriteNoSnpFull) ||
+           opcode == static_cast<int>(ChiReqOpcode::WriteNoSnpPtl);
+}
+
+// 从 secvec 计算有效 flit 数 (popcount)
+inline uint32_t secvec_to_flits(uint32_t secvec) {
+    return __builtin_popcount(secvec & 0xF);
+}
+
+// 从 secvec bit-i 计算该段在 cacheline 中的字节起始偏移
+inline uint32_t secvec_bit_to_offset(int bit) {
+    return static_cast<uint32_t>(bit) * CHI_FLIT_BYTES;
+}
+
+// dataid[1:0] → 字节偏移
+inline uint32_t dataid_to_offset(uint32_t dataid) {
+    return (dataid & 0x3u) * CHI_FLIT_BYTES;
+}
+
 // ---------- 事务类型枚举 ----------
 enum class TxnType : uint8_t {
     READ       = 0,
@@ -65,7 +101,7 @@ enum class Severity : uint8_t {
     FATAL
 };
 
-// 地址对齐辅助
-constexpr Addr_t CACHELINE_SIZE  = 64;  // 典型cacheline大小
+// 地址对齐辅助 (1024-bit / 128-byte cacheline)
+constexpr Addr_t CACHELINE_SIZE  = 128;
 constexpr Addr_t CACHELINE_MASK  = ~(CACHELINE_SIZE - 1);
 inline Addr_t align_to_cacheline(Addr_t addr) { return addr & CACHELINE_MASK; }
