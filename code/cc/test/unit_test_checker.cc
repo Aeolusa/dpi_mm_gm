@@ -22,12 +22,19 @@ protected:
         txn.tgt_id     = 0;
         txn.dbid       = 0;
         txn.type       = TxnType::WRITE;
-        txn.addr       = addr;
-        txn.size       = static_cast<uint32_t>(data.size());
+        txn.addr       = align_to_cacheline(addr);
+        txn.size       = CHI_CL_BYTES;
         txn.burst_len  = 1;
         txn.secvec     = 0xF;  // 测试中默认全段有效
-        txn.data       = std::move(data);
-        txn.byte_enable.assign(txn.size, true);
+        
+        txn.data.assign(CHI_CL_BYTES, 0);
+        txn.byte_enable.assign(CHI_CL_BYTES, false);
+        uint32_t offset = addr & (CHI_CL_BYTES - 1);
+        for (size_t i = 0; i < data.size() && offset + i < CHI_CL_BYTES; ++i) {
+            txn.data[offset + i] = data[i];
+            txn.byte_enable[offset + i] = true;
+        }
+        
         txn.req_time   = req_time;
         txn.resp_time  = resp_time;
         txn.status     = TxnStatus::COMPLETED;
@@ -44,13 +51,19 @@ protected:
         txn.tgt_id     = 0;
         txn.dbid       = 0;
         txn.type       = TxnType::READ;
-        txn.addr       = addr;
-        txn.size       = static_cast<uint32_t>(data.size());
+        txn.addr       = align_to_cacheline(addr);
+        txn.size       = CHI_CL_BYTES;
         txn.burst_len  = 1;
         txn.secvec     = 0xF;  // 测试中默认全段有效
-        txn.data       = std::move(data);
-        // 全部 byte_enable=true，表示所有字节都需要检查
-        txn.byte_enable.assign(txn.size, true);
+        
+        txn.data.assign(CHI_CL_BYTES, 0);
+        txn.byte_enable.assign(CHI_CL_BYTES, false);
+        uint32_t offset = addr & (CHI_CL_BYTES - 1);
+        for (size_t i = 0; i < data.size() && offset + i < CHI_CL_BYTES; ++i) {
+            txn.data[offset + i] = data[i];
+            txn.byte_enable[offset + i] = true; // 全部 byte_enable=true，表示需要检查的字节
+        }
+        
         txn.req_time   = req_time;
         txn.resp_time  = resp_time;
         txn.status     = TxnStatus::COMPLETED;

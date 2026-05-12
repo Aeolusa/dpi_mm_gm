@@ -27,11 +27,19 @@ protected:
         txn.tgt_id     = 0;
         txn.dbid       = 0;
         txn.type       = TxnType::WRITE;
-        txn.addr       = addr;
-        txn.size       = static_cast<uint32_t>(data.size());
+        txn.addr       = align_to_cacheline(addr);
+        txn.size       = CHI_CL_BYTES;
         txn.burst_len  = 1;
-        txn.data       = std::move(data);
-        txn.byte_enable.assign(txn.size, true);
+        txn.secvec     = 0xF;
+        
+        txn.data.assign(CHI_CL_BYTES, 0);
+        txn.byte_enable.assign(CHI_CL_BYTES, false);
+        uint32_t offset = addr & (CHI_CL_BYTES - 1);
+        for (size_t i = 0; i < data.size() && offset + i < CHI_CL_BYTES; ++i) {
+            txn.data[offset + i] = data[i];
+            txn.byte_enable[offset + i] = true;
+        }
+
         txn.req_time   = time - 5;
         txn.resp_time  = time;
         txn.status     = TxnStatus::COMPLETED;
