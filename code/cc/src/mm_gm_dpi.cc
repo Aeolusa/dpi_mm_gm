@@ -163,6 +163,24 @@ void dpi_chi_rxdat(int mst_idx, int txnid, int opcode,
     );
 }
 
+// ---- 后门 hex 文件预加载 ----
+//   filepath        : hex 文件路径
+//   mem_width_bytes : 每行数据宽度（字节数），如 8 表示 64-bit
+// 格式:
+//   @80000000          ← hex 基地址
+//   ffffffffaaaaaaaa   ← 每行 mem_width_bytes 字节的 hex 数据
+// 返回 1=成功, 0=失败
+int refmodel_preload_hex(const char* filepath, int mem_width_bytes) {
+    if (!g_mgr) return 0;
+    // 空路径：静默跳过，返回成功
+    if (!filepath || std::strlen(filepath) == 0) return 1;
+    bool ok = g_mgr->get_checker().preload_hex_file(
+        std::string(filepath),
+        static_cast<uint32_t>(mem_width_bytes)
+    );
+    return ok ? 1 : 0;
+}
+
 // ---- 仿真结束 ----
 void refmodel_finish() {
     if (g_mgr) {

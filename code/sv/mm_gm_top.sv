@@ -124,6 +124,15 @@ module mm_gm_top #(
     // 运行时动态切换日志级别
     import "DPI-C" function void refmodel_set_log_level(input int log_level);
 
+    // 后门 hex 文件预加载（mem 初始化）
+    //   filepath        : hex 文件路径
+    //   mem_width_bytes : 每行数据宽度（字节数）
+    // 返回 1=成功, 0=失败
+    import "DPI-C" function int refmodel_preload_hex(
+        input string filepath,
+        input int mem_width_bytes
+    );
+
     bit initial_m1;
     bit initial_m2
 

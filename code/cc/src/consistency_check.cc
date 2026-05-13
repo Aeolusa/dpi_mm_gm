@@ -2,11 +2,102 @@
 // file: src/consistency_check.cc
 // ============================================================
 #include "consistency_check.h"
+#include "logger.h"
 
 #include <iostream>
 #include <iomanip>
 #include <cassert>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+
+// ============================================================
+// 后门预加载：hex 文件 → shadow memory
+// 格式:
+//   @80000000              ← 16进制基地址
+//   ffffffffaaaaaaaa       ← 每行 mem_width_bytes 字节，hex 编码
+//   ...
+// 数据按地址递增存储，每行 hex 字符数 = mem_width_bytes * 2
+// hex 串高位在左，内存存储按小端（低字节在低地址）
+// ============================================================
+bool ConsistencyChecker::preload_hex_file(const std::string& filepath,
+                                           uint32_t mem_width_bytes)
+{
+    std::ifstream ifs(filepath);
+    if (!ifs.is_open()) {
+        LOG_ERROR("[PRELOAD] Cannot open hex file: " << filepath << "\n");
+        return false;
+    }
+
+    Addr_t base_addr = 0;
+    bool   addr_set  = false;
+    uint64_t total_bytes = 0;
+    uint64_t line_no = 0;
+
+    std::string line;
+    while (std::getline(ifs, line)) {
+        line_no++;
+
+        // 去除首尾空白
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) continue; // 空行
+        line = line.substr(start);
+        size_t end = line.find_last_not_of(" \t\r\n");
+        if (end != std::string::npos) line = line.substr(0, end + 1);
+
+        if (line.empty()) continue;
+
+        // 跳过注释行（以 // 或 # 开头）
+        if (line[0] == '#' || (line.size() >= 2 && line[0] == '/' && line[1] == '/'))
+            continue;
+
+        // @ADDR 行
+        if (line[0] == '@') {
+            std::string addr_str = line.substr(1);
+            base_addr = std::stoull(addr_str, nullptr, 16);
+            addr_set = true;
+            continue;
+        }
+
+        if (!addr_set) {
+            LOG_ERROR("[PRELOAD] Data before @ADDR at line " << line_no << "\n");
+            continue;
+        }
+
+        // 数据行：解析 hex 字符串为字节数组
+        // hex 串高位在左 → 先出现的 hex 字符是高字节
+        // 存储到内存时按小端：高字节放高地址
+        uint32_t hex_len = static_cast<uint32_t>(line.size());
+        uint32_t byte_count = hex_len / 2;
+
+        if (byte_count != mem_width_bytes) {
+            LOG_DEBUG("[PRELOAD] Line " << line_no << ": expected "
+                      << mem_width_bytes * 2 << " hex chars, got " << hex_len
+                      << ", adjusting\n");
+        }
+
+        Data_t data(byte_count, 0);
+        for (uint32_t i = 0; i < byte_count; ++i) {
+            // hex 串位置 i*2 对应最高字节
+            // 小端存储：hex 位置 i*2 → data[byte_count - 1 - i]
+            std::string byte_str = line.substr(i * 2, 2);
+            uint8_t val = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+            data[byte_count - 1 - i] = val;
+        }
+
+        shadow_mem_.preload(base_addr, data);
+        base_addr += byte_count;
+        total_bytes += byte_count;
+    }
+
+    LOG_ALWAYS("[PRELOAD] Loaded " << total_bytes << " bytes from " << filepath << "\n");
+    return true;
+}
+
+void ConsistencyChecker::preload(Addr_t base_addr, const Data_t& data) {
+    shadow_mem_.preload(base_addr, data);
+}
+
 
 void ConsistencyChecker::process_write(const Transaction& txn) {
     assert(txn.type == TxnType::WRITE);

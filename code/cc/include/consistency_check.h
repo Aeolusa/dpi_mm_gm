@@ -32,6 +32,15 @@ public:
     // ---------- 处理读完成并检查 ----------
     CheckReport process_read(const Transaction& txn);
 
+    // ---------- 后门预加载 ----------
+    // 加载 hex 文件到 shadow memory（不产生写历史）
+    // 格式: @ADDR (hex地址)，后续每行为 hex 数据，宽度 = mem_width_bytes 字节
+    // 支持可变 memory 宽度（如 4/8/16/32 字节）
+    bool preload_hex_file(const std::string& filepath, uint32_t mem_width_bytes);
+
+    // 直接 preload 一段数据
+    void preload(Addr_t base_addr, const Data_t& data);
+
     // ---------- 统计 ----------
     struct Stats {
         uint64_t total_reads  = 0;
