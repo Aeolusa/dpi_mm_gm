@@ -2,11 +2,13 @@
 // file: sv/mm_gm_bfm.sv
 // CHI BFM：监听单个 MST 接口的所有通道 flit
 //   - 通过 MST_IDX 参数区分不同BFM实例
+//   - 通过 IS_SM 参数标识 SM 类型 master
 //   - 所有 DPI 函数新增 mst_idx 参数
 // ============================================================
   
 module mm_gm_bfm #(
     parameter int  MST_IDX                              = 0,    // BFM 实例编号
+    parameter bit  IS_SM                                = 0,    // 是否为 SM 类型 master
     parameter REQ_W                                     = 1,
     parameter TXRSP_CHNS                                = 1,
     parameter TXRSP_W                                   = 1,
@@ -32,9 +34,10 @@ module mm_gm_bfm #(
     input logic [RXDAT_CHNS-1:0]                        rxdat_flitv           
 );
 
-    // ---- DPI-C 函数声明（均新增 mst_idx 参数） ----
+    // ---- DPI-C 函数声明 ----
 
     // txreq：读写请求统一入口（opcode 区分 RdNoSnp / WrNoSnp）
+    //   新增 is_sm 参数，标识 SM 类型 master
     import "DPI-C" function void dpi_chi_txreq(
         input int mst_idx,
         input int txnid,
@@ -42,7 +45,8 @@ module mm_gm_bfm #(
         input int size, 
         input int opcode,
         input int secvec,
-        input longint req_time
+        input longint req_time,
+        input int is_sm
     );
 
     // rxrsp：DBIDResp / CompDBIDResp
@@ -246,7 +250,8 @@ module mm_gm_bfm #(
                 txreq.size, 
                 txreq.opcode, 
                 txreq.secvec, 
-                $time
+                $time,
+                IS_SM
             );
         end
     end

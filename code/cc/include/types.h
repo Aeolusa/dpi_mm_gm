@@ -61,9 +61,20 @@ inline uint32_t secvec_bit_to_offset(int bit) {
     return static_cast<uint32_t>(bit) * CHI_FLIT_BYTES;
 }
 
-// dataid[1:0] → 字节偏移
+// dataid → 字节偏移
+// CHI dataid 编码: 0→offset 0, 2→offset 32, 4→offset 64, 6→offset 96
 inline uint32_t dataid_to_offset(uint32_t dataid) {
-    return (dataid & 0x3u) * CHI_FLIT_BYTES;
+    return (dataid >> 1) * CHI_FLIT_BYTES;
+}
+
+// CHI size 编码 → 期望的 data flit 数量
+//   size 1~5 → 1 flit (≤32B)
+//   size 6   → 2 flits (64B)
+//   size 7   → 4 flits (128B)
+inline uint32_t size_to_flits(uint32_t size) {
+    if (size <= 5) return 1;
+    if (size == 6) return 2;
+    return 4; // size == 7
 }
 
 // ---------- 事务类型枚举 ----------

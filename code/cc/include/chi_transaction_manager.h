@@ -4,7 +4,8 @@
 //   - 以 (mst_idx, txnid) 作为事务匹配键
 //   - 支持 secvec 驱动的有效字节范围
 //   - 支持 dataid 驱动的数据组装
-//   - 支持 data_cnt (SM类型特有)
+//   - SM 写事务由 BFM 参数 IS_SM 标识，使用 secvec popcount 决定 flit 数
+//   - 非 SM 事务使用 size 编码决定 flit 数
 // ============================================================
 #pragma once
 
@@ -16,6 +17,7 @@
 #include <array>
 #include <cstdint>
 #include <vector>
+#include <mutex>
 
 // ============================================================
 // MstKey：单个BFM实例内的事务唯一键
@@ -53,6 +55,7 @@ struct ChiOutstandingWrite {
     Addr_t   addr;          // cacheline 对齐地址
     uint32_t opcode;        // 写 opcode (WriteNoSnpFull/Ptl)
     uint32_t secvec;        // 4-bit：哪些 32B 段有效
+    bool     is_sm = false; // 是否为 SM 类型 master
 
     // DBID 阶段（rxrsp 后填充）
     uint32_t dbid        = 0;
@@ -63,9 +66,11 @@ struct ChiOutstandingWrite {
     std::array<bool,    CHI_CL_BYTES> be_buf     = {};
 
     // flit 计数
-    uint32_t expected_flits    = 0;  // 来自 secvec popcount 或 data_cnt (SM)
+    //   SM 写: expected_flits 初始由 secvec 估算，收到首笔 txdat 后由 data_cnt 覆盖
+    //   非 SM: expected_flits = size_to_flits(size)
+    uint32_t expected_flits    = 0;
     uint32_t accumulated_flits = 0;
-    bool     use_data_cnt      = false; // SM 类型时为 true
+    bool     data_cnt_applied  = false; // SM: data_cnt 已覆盖 expected_flits
 
     Timestamp_t req_time = 0;
 };
@@ -101,9 +106,11 @@ public:
     // ---- DPI-C 接口 ----
 
     // txreq 通道：读或写请求（由 opcode 区分）
+    //   is_sm: 是否为 SM 类型 master（由 BFM 参数传入）
     void process_txreq(uint32_t mst_idx, uint32_t txn_id,
                        Addr_t addr, uint32_t size, uint32_t opcode,
-                       uint32_t secvec, Timestamp_t req_time);
+                       uint32_t secvec, Timestamp_t req_time,
+                       bool is_sm);
 
     // rxrsp 通道：DBIDResp / CompDBIDResp
     void process_rxrsp_dbid(uint32_t mst_idx, uint32_t txn_id,
@@ -130,6 +137,9 @@ public:
 private:
     ConsistencyChecker checker_;
     SeqNum_t           global_seq_;
+
+    // 线程安全锁（多通道 DPI 并发调用保护）
+    std::mutex         mtx_;
 
     // outstanding_writes_: (mst_idx, txnid) → 写请求
     std::unordered_map<MstKey, ChiOutstandingWrite> outstanding_writes_;

@@ -2,10 +2,11 @@
 // file: src/mm_gm_dpi.cc
 // SystemVerilog DPI-C 外部接口 (CHI)
 //
-// 新接口说明：
+// 接口说明：
 //   - 所有函数新增 mst_idx 参数，区分不同BFM实例
 //   - 数据通道传入原生 256-bit (svBitVecVal* = uint32_t[8])
 //   - 读写事务均通过 process_txreq 路由，opcode 区分类型
+//   - txreq 新增 is_sm 参数，由 BFM 参数 IS_SM 传入
 //   - NCBWrData.txnid 实际为 dbid（CHI协议规定）
 // ============================================================
 #include "chi_transaction_manager.h"
@@ -75,7 +76,6 @@ void refmodel_set_log_level(int log_level) {
 }
 
 // ---- txreq: 读或写请求（opcode 区分） ----
-// SV 侧对应 dpi_chi_txreq_write（BFM统一函数名，opcode区分读写）
 //   mst_idx : BFM实例编号
 //   txnid   : CHI txnid (12-bit, in SV passed as int)
 //   addr    : 54-bit 地址
@@ -83,8 +83,10 @@ void refmodel_set_log_level(int log_level) {
 //   opcode  : 4-bit REQOPCODE
 //   secvec  : 4-bit cacheline 有效段向量
 //   req_time: $time (ns)
+//   is_sm   : 是否为 SM 类型 master（BFM 参数 IS_SM）
 void dpi_chi_txreq(int mst_idx, int txnid, long long addr,
-                   int size, int opcode, int secvec, long long req_time)
+                   int size, int opcode, int secvec,
+                   long long req_time, int is_sm)
 {
     if (!g_mgr) return;
     g_mgr->process_txreq(
@@ -94,7 +96,8 @@ void dpi_chi_txreq(int mst_idx, int txnid, long long addr,
         static_cast<uint32_t>(size),
         static_cast<uint32_t>(opcode),
         static_cast<uint32_t>(secvec),
-        static_cast<uint64_t>(req_time)
+        static_cast<uint64_t>(req_time),
+        is_sm != 0
     );
 }
 
@@ -116,7 +119,7 @@ void dpi_chi_rxrsp_dbid(int mst_idx, int txnid, int opcode, int dbid)
 // ---- txdat: NCBWrData（写数据） ----
 //   txnid    : 注意！这里传入的实际是 dbid 值（CHI协议 NCBWrData.txnid = DBID）
 //   opcode   : 2-bit DATOPCODE
-//   dataid   : 4-bit，低2位[1:0]决定在cacheline中的偏移 (dataid*32 bytes)
+//   dataid   : 4-bit, 编码: 0/2/4/6 → 对应 cacheline 中 32B 段
 //   data     : bit[255:0] → 以 8 x uint32_t 传入 (svBitVecVal)
 //   be       : 32-bit byte enable (bit i → byte i)
 //   data_cnt : SM 专用，表示本次事务总flit数；其他类型传0

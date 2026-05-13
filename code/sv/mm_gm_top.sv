@@ -149,6 +149,7 @@ module mm_gm_top #(
     for (genvar idx = 0; idx < SM_NUMS; idx++) begin : SM_BFM
         mm_gm_bfm #(
             .MST_IDX                                (idx),
+            .IS_SM                                  (1),
             .REQ_W                                  (SM_REQ_W),
             .TXRSP_CHNS                             (SM_TXRSP_CHNS),
             .TXRSP_W                                (SM_TXRSP_W),
@@ -177,6 +178,7 @@ module mm_gm_top #(
     // HOST BFM inst (MST_IDX = SM_NUMS, e.g. 8)
     mm_gm_bfm #(
         .MST_IDX                                (SM_NUMS),
+        .IS_SM                                  (0),
         .REQ_W                                  (HST_REQ_W),
         .TXRSP_CHNS                             (HST_TXRSP_CHNS),
         .TXRSP_W                                (HST_TXRSP_W),
@@ -204,6 +206,7 @@ module mm_gm_top #(
     // TS BFM inst (MST_IDX = SM_NUMS+1, e.g. 9)
     mm_gm_bfm #(
         .MST_IDX                                (SM_NUMS + 1),
+        .IS_SM                                  (0),
         .REQ_W                                  (TS_REQ_W),
         .TXRSP_CHNS                             (TS_TXRSP_CHNS),
         .TXRSP_W                                (TS_TXRSP_W),
@@ -231,6 +234,7 @@ module mm_gm_top #(
     // BLIT BFM inst (MST_IDX = SM_NUMS+2, e.g. 10)
     mm_gm_bfm #(
         .MST_IDX                                (SM_NUMS + 2),
+        .IS_SM                                  (0),
         .REQ_W                                  (BLIT_REQ_W),
         .TXRSP_CHNS                             (BLIT_TXRSP_CHNS),
         .TXRSP_W                                (BLIT_TXRSP_W),

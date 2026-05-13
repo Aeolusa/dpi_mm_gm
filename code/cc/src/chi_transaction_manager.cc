@@ -1,6 +1,9 @@
 // ============================================================
 // file: src/chi_transaction_manager.cc
 // CHI 事务管理器实现
+//   - SM 写事务: expected_flits = secvec popcount
+//   - 其他事务:  expected_flits = size_to_flits(size)
+//   - 多通道并发保护 (mutex)
 // ============================================================
 #include "chi_transaction_manager.h"
 #include "logger.h"
@@ -85,23 +88,30 @@ void ChiTransactionManager::finalize_read(ChiOutstandingRead& req,
 // ============================================================
 // process_txreq: 由 txreq_flitv 触发
 //   opcode 区分 RdNoSnp / WrNoSnp
-//   secvec: 支持片选，即一个 txreq 可以对应多个 cacheline 的读取
+//   expected_flits 计算规则：
+//     - SM 写请求: secvec popcount
+//     - 其他请求:  size_to_flits(size)
+//   secvec 编码与 dataid 的对应关系:
+//     secvec[0]=1 → dataid=0,  secvec[1]=1 → dataid=2,
+//     secvec[2]=1 → dataid=4,  secvec[3]=1 → dataid=6
 // ============================================================
 void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
                                            Addr_t addr, uint32_t size,
                                            uint32_t opcode, uint32_t secvec,
-                                           Timestamp_t req_time)
+                                           Timestamp_t req_time, bool is_sm)
 {
+    std::lock_guard<std::mutex> lock(mtx_);
+
     MstKey key = {mst_idx, txn_id};
-    uint32_t exp_flits = secvec_to_flits(secvec);
-    if (exp_flits == 0) exp_flits = 1; // 至少1笔（防御）
 
     if (chi_is_read_opcode(opcode)) {
-        // ---- 读请求 ----
+        // ---- 读请求：所有类型均使用 size 决定 flit 数 ----
         if (outstanding_reads_.count(key)) {
             LOG_DEBUG("[CHI MGR] WARN: duplicate txreq read "
                       << "mst=" << mst_idx << " txnid=" << txn_id << "\n");
         }
+        uint32_t exp_flits = size_to_flits(size);
+
         ChiOutstandingRead req{};
         req.key             = key;
         req.addr            = addr;
@@ -117,11 +127,18 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
             LOG_DEBUG("[CHI MGR] WARN: duplicate txreq write "
                       << "mst=" << mst_idx << " txnid=" << txn_id << "\n");
         }
+
+        // SM 写使用 secvec popcount；非 SM 写使用 size 编码
+        uint32_t exp_flits = is_sm ? secvec_to_flits(secvec)
+                                   : size_to_flits(size);
+        if (exp_flits == 0) exp_flits = 1; // 至少1笔（防御）
+
         ChiOutstandingWrite req{};
         req.key             = key;
         req.addr            = addr;
         req.opcode          = opcode;
         req.secvec          = secvec;
+        req.is_sm           = is_sm;
         req.expected_flits  = exp_flits;
         req.req_time        = req_time;
         outstanding_writes_[key] = req;
@@ -143,6 +160,8 @@ void ChiTransactionManager::process_rxrsp_dbid(uint32_t mst_idx,
                                                 uint32_t opcode,
                                                 uint32_t dbid)
 {
+    std::lock_guard<std::mutex> lock(mtx_);
+
     MstKey key = {mst_idx, txn_id};
     auto it = outstanding_writes_.find(key);
     if (it == outstanding_writes_.end()) {
@@ -164,6 +183,7 @@ void ChiTransactionManager::process_rxrsp_dbid(uint32_t mst_idx,
 // process_txdat: 由 txdat_flitv 触发 (NCBWrData)
 //   注意：txdat.txnid 字段实际携带的是 dbid！
 //         即 NCBWrData.txnid = DBIDResp.dbid
+//   dataid 编码: 0/2/4/6 → 对应 cacheline 中的 32B 段偏移
 // ============================================================
 void ChiTransactionManager::process_txdat(uint32_t mst_idx,
                                            uint32_t txn_id_as_dbid,
@@ -173,6 +193,8 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
                                            uint32_t be_mask,
                                            uint32_t data_cnt)
 {
+    std::lock_guard<std::mutex> lock(mtx_);
+
     // 用 (mst_idx, dbid) 找回原始 txnid
     MstKey dbid_key = {mst_idx, txn_id_as_dbid};
     auto dbid_it = dbid_to_txnid_.find(dbid_key);
@@ -193,13 +215,13 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
 
     ChiOutstandingWrite& req = req_it->second;
 
-    // SM 类型特性：data_cnt 覆盖 expected_flits（仅第一笔有效时设置）
-    if (data_cnt > 0 && !req.use_data_cnt) {
-        req.expected_flits = data_cnt;
-        req.use_data_cnt   = true;
+    // SM 写事务：收到首笔 txdat 时，用 data_cnt 覆盖 expected_flits
+    if (req.is_sm && data_cnt > 0 && !req.data_cnt_applied) {
+        req.expected_flits   = data_cnt;
+        req.data_cnt_applied = true;
     }
 
-    // 按 dataid[1:0] 确定数据在 128B 缓冲中的偏移
+    // 按 dataid 确定数据在 128B 缓冲中的偏移
     uint32_t byte_offset = dataid_to_offset(dataid);
     if (byte_offset + CHI_FLIT_BYTES > CHI_CL_BYTES) {
         LOG_ERROR("[CHI MGR] ERROR: txdat dataid=" << dataid
@@ -228,6 +250,7 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
 // ============================================================
 // process_rxdat: 由 rxdat_flitv 触发 (CompData)
 //   rxdat.txnid = txreq.txnid（读事务）
+//   dataid 编码: 0/2/4/6 → 对应 cacheline 中的 32B 段偏移
 // ============================================================
 void ChiTransactionManager::process_rxdat(uint32_t mst_idx,
                                            uint32_t txn_id,
@@ -237,6 +260,8 @@ void ChiTransactionManager::process_rxdat(uint32_t mst_idx,
                                            uint32_t be_mask,
                                            uint32_t data_cnt)
 {
+    std::lock_guard<std::mutex> lock(mtx_);
+
     MstKey key = {mst_idx, txn_id};
     auto it = outstanding_reads_.find(key);
     if (it == outstanding_reads_.end()) {
@@ -247,7 +272,7 @@ void ChiTransactionManager::process_rxdat(uint32_t mst_idx,
 
     ChiOutstandingRead& req = it->second;
 
-    // 按 dataid[1:0] 放置数据
+    // 按 dataid 放置数据
     uint32_t byte_offset = dataid_to_offset(dataid);
     if (byte_offset + CHI_FLIT_BYTES > CHI_CL_BYTES) {
         LOG_ERROR("[CHI MGR] ERROR: rxdat dataid=" << dataid
