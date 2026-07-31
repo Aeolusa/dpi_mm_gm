@@ -18,6 +18,7 @@ struct Transaction {
     // ---- 事务属性 ----
     TxnType     type;
     Addr_t      addr;            // cacheline 对齐起始地址
+    Addr_t      orig_addr = 0;   // 原始未对齐地址
     uint32_t    size;            // 数据缓冲区字节数（固定 CHI_CL_BYTES=128）
     uint32_t    burst_len;       // 固定为 1（数据由 byte_enable 标记有效字节）
     uint32_t    secvec;          // 4-bit 有效段向量，bit-i 对应 bytes[i*32:(i+1)*32-1]
@@ -47,7 +48,8 @@ struct Transaction {
         oss << "[TXN#" << txn_id
             << " MST=" << src_id
             << " " << (type == TxnType::WRITE ? "WR" : "RD")
-            << " @0x" << std::hex << addr
+            << " addr:0x" << std::hex << addr 
+            << "@0orig:0x" << std::hex << orig_addr << "(align:0x" << addr << ")"
             << " secvec=0b" << std::bitset<4>(secvec)
             << " t=" << std::dec << req_time << "->" << resp_time
             << "]";

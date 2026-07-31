@@ -9,6 +9,8 @@
 module mm_gm_bfm #(
     parameter int  MST_IDX                              = 0,    // BFM 实例编号
     parameter bit  IS_SM                                = 0,    // 是否为 SM 类型 master
+    parameter IS_FABRIC_CHI                             = 0,
+    parameter REQ_CHNS                                  = 1,
     parameter REQ_W                                     = 1,
     parameter TXRSP_CHNS                                = 1,
     parameter TXRSP_W                                   = 1,
@@ -17,13 +19,16 @@ module mm_gm_bfm #(
     parameter TXDAT_CHNS                                = 1,
     parameter TXDAT_W                                   = 1,
     parameter RXDAT_CHNS                                = 1,
-    parameter RXDAT_W                                   = 1 
+    parameter RXDAT_W                                   = 1,
+    // SNP channel (IS_FABRIC_CHI only)
+    parameter RXSNP_CHNS                                = 1,
+    parameter RXSNP_W                                   = 1 
 ) (
     input bit                                           clk,
     input bit                                           rstn,
 
-    input logic [REQ_W-1:0]                             txreq_flit,
-    input logic                                         txreq_flitv,
+    input logic [REQ_CHNS-1:0][REQ_W-1:0]               txreq_flit,
+    input logic [REQ_CHNS-1:0]                          txreq_flitv,
     input logic [TXRSP_CHNS-1:0][TXRSP_W-1:0]           txrsp_flit,
     input logic [TXRSP_CHNS-1:0]                        txrsp_flitv,
     input logic [RXRSP_CHNS-1:0][RXRSP_W-1:0]           rxrsp_flit,
@@ -31,10 +36,23 @@ module mm_gm_bfm #(
     input logic [TXDAT_CHNS-1:0][TXDAT_W-1:0]           txdat_flit,
     input logic [TXDAT_CHNS-1:0]                        txdat_flitv,
     input logic [RXDAT_CHNS-1:0][RXDAT_W-1:0]           rxdat_flit,
-    input logic [RXDAT_CHNS-1:0]                        rxdat_flitv           
+    input logic [RXDAT_CHNS-1:0]                        rxdat_flitv,
+    input logic [RXSNP_CHNS-1:0][RXSNP_W-1:0]           rxsnp_flit,
+    input logic [RXSNP_CHNS-1:0]                        rxsnp_flitv,
+    output logic                                        bfm_err_flag           
 );
 
     // ---- DPI-C 函数声明 ----
+
+    export "DPI-C" function sv_set_gm_error;
+    function void sv_set_gm_error();
+        bfm_err_flag = 1'b1;
+    endfunction
+
+    export "DPI-C" function sv_clr_gm_error;
+    function void sv_clr_gm_error();
+        bfm_err_flag = 1'b0;
+    endfunction
 
     // txreq：读写请求统一入口（opcode 区分 RdNoSnp / WrNoSnp）
     //   新增 is_sm 参数，标识 SM 类型 master
@@ -46,7 +64,10 @@ module mm_gm_bfm #(
         input int opcode,
         input int secvec,
         input longint req_time,
-        input int is_sm
+        input int is_sm,
+        input bit soft_ctrl,
+        input bit is_fabric_chi,
+        input bit [511:0] flit
     );
 
     // rxrsp：DBIDResp / CompDBIDResp
@@ -54,7 +75,10 @@ module mm_gm_bfm #(
         input int mst_idx,
         input int txnid, 
         input int opcode,
-        input int dbid
+        input int dbid,
+        input bit soft_ctrl,
+        input bit is_fabric_chi,
+        input bit [511:0] flit
     );
 
     // txdat：发送写数据 NCBWrData
@@ -66,7 +90,10 @@ module mm_gm_bfm #(
         input int dataid,   
         input bit [255:0] data, 
         input int be, 
-        input int data_cnt
+        input int data_cnt,
+        input bit soft_ctrl,
+        input bit is_fabric_chi,
+        input bit [511:0] flit
     );
 
     // rxdat：接收读数据 CompData
@@ -77,7 +104,21 @@ module mm_gm_bfm #(
         input int dataid,   
         input bit [255:0] data, 
         input int be, 
-        input int data_cnt
+        input int data_cnt,
+        input bit soft_ctrl,
+        input bit is_fabric_chi,
+        input bit [511:0] flit
+    );
+
+    // rxsnp：for snp data
+    import "DPI-C" function void dpi_chi_rxsnp(
+        input int mst_idx,
+        input int txnid,
+        input longint addr,
+        input longint req_time,
+        input bit soft_ctrl,
+        input bit is_fabric_chi,
+        input bit [511:0] flit
     );
 
     // ---- Flit 域宽参数 ----
@@ -158,10 +199,11 @@ module mm_gm_bfm #(
     endfunction
 
     // ---- 中间信号 ----
-    req_t txreq;
+    req_t txreq[REQ_CHNS-1:0];
     rsp_t rxrsp[RXRSP_CHNS-1:0];
     dat_t txdat[TXDAT_CHNS-1:0];
     dat_t rxdat[RXDAT_CHNS-1:0];
+    snp_t rxsnp[RXSNP_CHNS-1:0];
 
     // ---- txreq 解析 ----
     always_comb begin
@@ -186,7 +228,10 @@ module mm_gm_bfm #(
                     MST_IDX,
                     rxrsp[i].txnid,
                     rxrsp[i].opcode,
-                    rxrsp[i].dbid
+                    rxrsp[i].dbid,
+                    soft_ctrl,
+                    IS_FABRIC_CHI,
+                    512'(rxrsp_flit[i])
                 );
             end
         end
@@ -210,7 +255,10 @@ module mm_gm_bfm #(
                     txdat[i].dataid,
                     txdat[i].data,
                     txdat[i].be,
-                    txdat[i].data_cnt // SM专有：总flit数；其他类型为0
+                    txdat[i].data_cnt,
+                    soft_ctrl,
+                    IS_FABRIC_CHI,
+                    512'(txdat_flit[i])
                 );
             end
         end
@@ -234,26 +282,67 @@ module mm_gm_bfm #(
                     rxdat[i].dataid,
                     rxdat[i].data,
                     rxdat[i].be,
-                    rxdat[i].data_cnt
+                    rxdat[i].data_cnt,
+                    soft_ctrl,
+                    IS_FABRIC_CHI,
+                    512'(rxdat_flit[i])
                 );
             end
         end
     end
 
-    // ---- txreq DPI调用（读写统一，opcode区分） ----
-    always_ff @(posedge clk) begin
-        if (txreq_flitv) begin
-            dpi_chi_txreq(
-                MST_IDX,
-                txreq.txnid, 
-                txreq.addr, 
-                txreq.size, 
-                txreq.opcode, 
-                txreq.secvec, 
-                $time,
-                IS_SM
-            );
+    for (genvar i = 0; i < REQ_CHNS; i++) begin
+        // ---- txreq DPI调用（读写统一，opcode区分） ----
+        always_ff @(posedge clk) begin
+            if (txreq_flitv[i]) begin
+                dpi_chi_txreq(
+                    MST_IDX,
+                    txreq[i].txnid, 
+                    txreq[i].addr, 
+                    txreq[i].size, 
+                    txreq[i].opcode, 
+                    txreq[i].secvec, 
+                    $time,
+                    IS_SM,
+                    soft_ctrl,
+                    IS_FABRIC_CHI,
+                    512'(txreq_flit[i])
+                );
+            end
         end
     end
+
+    if (IS_FABRIC_CHI) begin: SNP_BLOCK
+        function snp_t snp2dpi(input logic [SNP_W-1:0] snp_flit);
+            snp_t snp;
+            snp.txnid   = snp_flit[`SNP_TXNID];
+            snp.addr    = snp_flit[`SNP_ADDR];
+            return snp;
+        endfunction
+
+        for (genvar i = 0; i < RXSNP_CHNS; i++) begin
+            always_comb begin
+                rxsnp[i] = '0;
+                if (rxsnp_flitv[i]) begin
+                    rxsnp[i] = snp2dpi(rxsnp_flit[i]);
+                end
+            end
+
+            always_ff @(posedge clk) begin
+                if (rxsnp_flitv[i]) begin
+                    dpi_chi_rxsnp(
+                        MST_IDX,
+                        rxsnp[i].txnid,
+                        rxsnp[i].addr,
+                        $time,
+                        soft_ctrl,
+                        IS_FABRIC_CHI,
+                        512'(rxsnp_flit[i])
+                    );
+                end
+            end
+        end
+    end
+    
 
 endmodule

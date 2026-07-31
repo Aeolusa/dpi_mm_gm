@@ -29,6 +29,43 @@ using TxnId_t   = uint64_t;       // 全局唯一事务ID
 using Timestamp_t = uint64_t;     // 仿真时间戳（单位：ns or cycle）
 using SeqNum_t  = uint64_t;       // 全局递增序列号
 
+// ---------- MST Type enum --------
+enum class MasterType: uint32_t {
+    SM0                 = 0,
+    SM1                 = 1,
+    SM2                 = 2,
+    SM3                 = 3,
+    SM4                 = 4,
+    SM5                 = 5,
+    SM6                 = 6,
+    SM7                 = 7,
+    SM8                 = 8,
+    SM9                 = 9,
+    SM10                = 10,
+    SM11                = 11,
+    HOST                = 12,
+    TS                  = 13,
+    BLIT_MMU            = 14,
+    BLIT                = 15,
+    VPU                 = 16,
+    UNKNOWN             = 0xFFFFFFFF
+};
+
+inline std::string get_mst_name(uint32_t mst_idx) {
+    if (mst_idx <= static_cast<uint32_t>(MasterType::SM11)) {
+        return "SM[" + std::to_string(mst_idx) + "]";
+    }
+    switch (static_cast<MasterType>(mst_idx)) {
+        case MasterType::HOST:        return "HOST";
+        case MasterType::TS:          return "TS";
+        case MasterType::BLIT_MMU:    return "BLIT_MMU";
+        case MasterType::BLIT:        return "BLIT";
+        case MasterType::VPU:         return "VPU";
+        default: 
+            return "UNKNOWN(" + std::to_string(mst_idx) + ")";
+    }
+}
+
 // ---------- CHI 协议常量 ----------
 constexpr uint32_t CHI_FLIT_BYTES = 32;   // 256-bit data flit = 32 bytes
 constexpr uint32_t CHI_MAX_FLITS  = 4;    // 最多4笔 data flit (secvec 4-bit)
@@ -36,25 +73,131 @@ constexpr uint32_t CHI_CL_BYTES   = 128;  // 1024-bit cacheline = 128 bytes
 
 // CHI 请求 opcode (4-bit REQOPCODE)
 enum class ChiReqOpcode : uint8_t {
-    ReadNoSnp      = 0x1,
-    WriteNoSnpFull = 0xC,
-    WriteNoSnpPtl  = 0xD,
-    UNKNOWN        = 0xFF
+    // SM BLIT TS
+    ReadNoSnp           = 0x1,
+    WriteNoSnpFull      = 0x2,
+    WriteNoSnpPtl       = 0x3,
+    mbar                = 0x4,
+    PrefetchL2          = 0x5,
+    Atomic              = 0x6,
+    CCTL                = 0x7,
+    PCrdReturn          = 0x8,
+
+    // HOST
+    Host_ReqLcrdReturn  = 0x0,
+    Host_ReadNoSnp      = 0x4,
+    Host_WriteNoSnpPtl  = 0x1C,
+    Host_WriteNoSnpFull = 0x1D,
+    Host_WriteBackFull  = 0x1B,
+    Host_WriteBackPtl   = 0x1A,
+    Host_CleanInvalid   = 0x9,
+    Host_MakeInvalid    = 0xA,
+    Host_CleanUnique    = 0xB,
+    Host_MakeUnique     = 0xC,
+
+    UNKNOWN             = 0xFF
 };
 
-inline bool chi_is_read_opcode(int opcode) {
-    return opcode == static_cast<int>(ChiReqOpcode::ReadNoSnp);
+inline bool chi_is_reqlcrdreturn(int opcode) {
+    return opcode == static_cast<int>(ChiReqOpcode::Host_ReqLcrdReturn);
 }
+
+inline bool chi_is_read_opcode(int opcode) {
+    return opcode == static_cast<int>(ChiReqOpcode::ReadNoSnp) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_ReadNoSnp);
+}
+
 inline bool chi_is_write_opcode(int opcode) {
     return opcode == static_cast<int>(ChiReqOpcode::WriteNoSnpFull) ||
-           opcode == static_cast<int>(ChiReqOpcode::WriteNoSnpPtl);
+           opcode == static_cast<int>(ChiReqOpcode::WriteNoSnpPtl) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_WriteBackFull) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_WriteBackPtl) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_WriteNoSnpFull) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_WriteNoSnpPtl);
+}
+
+inline bool chi_is_dataless_opcode(int opcode) {
+    return opcode == static_cast<int>(ChiReqOpcode::mbar) ||
+           opcode == static_cast<int>(ChiReqOpcode::PrefetchL2) ||
+           opcode == static_cast<int>(ChiReqOpcode::Atomic) ||
+           opcode == static_cast<int>(ChiReqOpcode::CCTL) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_CleanInvalid) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_MakeInvalid) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_CleanUnique) ||
+           opcode == static_cast<int>(ChiReqOpcode::Host_MakeUnique);
+}
+
+enum class ChiRspOpocde : uint8_t {
+    // SM BLIT TS
+    Comp                = 0x4,
+    CompDBIDResp        = 0x5,
+    DBIDResp            = 0x3,
+
+    // HOST
+    Host_RspLcrdReturn  = 0x0,
+    Host_Comp           = 0x4,
+    Host_CompDBIDResp   = 0x5,
+    Host_DBIDResp       = 0x6
+};
+
+inline bool chi_is_rsplcrdreturn(int opcode) {
+    return opcode == static_cast<int>(ChiRspOpocde::Host_RspLcrdReturn);
+}
+
+inline bool chi_is_dbid_rsp_opcode(int opcode) {
+    return opcode == static_cast<int>(ChiRspOpocde::CompDBIDResp) ||
+           opcode == static_cast<int>(ChiRspOpocde::DBIDResp) ||
+           opcode == static_cast<int>(ChiRspOpocde::Host_CompDBIDResp) ||
+           opcode == static_cast<int>(ChiRspOpocde::Host_DBIDResp);
+}
+
+inline bool chi_is_comp_rsp_opcode(int opcode) {
+    return opcode == static_cast<int>(ChiRspOpocde::Comp) ||
+           opcode == static_cast<int>(ChiRspOpocde::Host_Comp);
+}
+
+namespace chi_dat {
+    enum Opcode : uint8_t {
+        CompData            = 0X1,
+        NCBWrData           = 0x2
+    };
+}
+
+namespace fabric_dat {
+    enum Opcode : uint8_t {
+        CompData            = 0x4,
+        NCBWrData           = 0x3,
+        CBWrData            = 0x2,
+        SnpRespData         = 0x1,
+        SnpRespDataPtl      = 0x5,
+        SnpRespDataFwded    = 0x6
+    };
+}
+
+inline bool chi_is_write_data_opcode(int opcode) {
+    return opcode == chi_dat::NCBWrData ||
+           opcode == fabric_dat::NCBWrData || 
+           opcode == fabric_dat::CBWrData;
+}
+
+inline bool chi_is_snp_resp_data_opcode(int opcode) {
+    return opcode == fabric_dat::SnpRespData || 
+           opcode == fabric_dat::SnpRespDataPtl ||
+           opcode == fabric_dat::SnpRespDataFwded;
 }
 
 // 从 secvec 计算有效 flit 数 (popcount)
 // secvec only valid in [3:0]
+#ifdef _MSC_VER
+#include <intrin.hyy>
+inline uint32_t secvec_to_flits(uint32_t secvec) {
+    return __popcnt(secvec & 0xF);
+}
+#else 
 inline uint32_t secvec_to_flits(uint32_t secvec) {
     return __builtin_popcount(secvec & 0xF);
 }
+#endif
 
 // 从 secvec bit-i 计算该段在 cacheline 中的字节起始偏移
 inline uint32_t secvec_bit_to_offset(int bit) {

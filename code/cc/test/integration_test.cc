@@ -7,12 +7,14 @@
 // ============================================================
 #include <gtest/gtest.h>
 #include "chi_transaction_manager.h"
+#include "logger.h"
 #include <array>
 #include <cstring>
 
 class IntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        Logger::instance().set_level(LogLevel::DEBUG);
         // strict mode
         mgr_ = std::make_unique<ChiTransactionManager>(true);
     }

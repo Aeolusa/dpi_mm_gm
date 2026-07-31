@@ -19,6 +19,9 @@
 #include <vector>
 #include <mutex>
 
+extern "C" void sv_set_gm_error();
+extern "C" void sv_clr_gm_error();
+
 // ============================================================
 // MstKey：单个BFM实例内的事务唯一键
 //   mst_idx : BFM实例编号 (例: SM0=0, SM1=1, ..., HST=8, TS=9, BLIT=10)
@@ -56,10 +59,13 @@ struct ChiOutstandingWrite {
     uint32_t opcode;        // 写 opcode (WriteNoSnpFull/Ptl)
     uint32_t secvec;        // 4-bit：哪些 32B 段有效
     bool     is_sm = false; // 是否为 SM 类型 master
+    uint32_t orig_size = 0;
 
     // DBID 阶段（rxrsp 后填充）
     uint32_t dbid        = 0;
     bool     dbid_valid  = false;
+    bool     comp_received = false;
+    bool     data_complete = false;
 
     // 128字节数据缓冲（按 dataid 散落填入）
     std::array<uint8_t, CHI_CL_BYTES> data_buf  = {};
@@ -70,9 +76,11 @@ struct ChiOutstandingWrite {
     //   非 SM: expected_flits = size_to_flits(size)
     uint32_t expected_flits    = 0;
     uint32_t accumulated_flits = 0;
+    uint8_t  received_dataids_mask = 0;
     bool     data_cnt_applied  = false; // SM: data_cnt 已覆盖 expected_flits
 
     Timestamp_t req_time = 0;
+    bool     filtered    = false; // 软过滤标记：数据不一致不报 ERROR
 };
 
 // ============================================================
@@ -85,6 +93,7 @@ struct ChiOutstandingRead {
     Addr_t   addr;
     uint32_t opcode;
     uint32_t secvec;
+    uint8_t  orig_size;
 
     // 128字节数据缓冲
     std::array<uint8_t, CHI_CL_BYTES> data_buf  = {};
@@ -92,7 +101,36 @@ struct ChiOutstandingRead {
 
     uint32_t expected_flits    = 0;
     uint32_t accumulated_flits = 0;
+    uint8_t  received_dataids_mask = 0;
 
+    Timestamp_t req_time = 0;
+    bool     filtered    = false; // 软过滤标记
+};
+
+// ============================================================
+// IN-fly dataless tracker
+// ============================================================
+struct ChiOutstandingDataless {
+    MstKey   key;
+    Addr_t   addr;
+    uint32_t opcode;
+    Timestamp_t req_time = 0;
+};
+
+// ============================================================
+// IN-fly Snoop tracker
+// ============================================================
+struct ChiOutstandingSnoop {
+    MstKey   key;
+    Addr_t   addr;
+    
+    // 128B data buffer
+    std::array<uint8_t, CHI_CL_BYTES> data_buf = {};
+    std::array<uint8_t, CHI_CL_BYTES> be_buf = {};
+
+    uint32_t expected_flits = 4;
+    uint32_t accumulated_flits = 0;
+    uint8_t received_dataids_mask = 0;
     Timestamp_t req_time = 0;
 };
 
@@ -101,7 +139,13 @@ struct ChiOutstandingRead {
 // ============================================================
 class ChiTransactionManager {
 public:
-    explicit ChiTransactionManager(bool strict_mode = true);
+    explicit ChiTransactionManager(bool strict_mode = true,
+                                   uint64_t addr_filter_mask = 0);
+
+    // 检查地址是否应被软过滤（完整跟踪但数据不一致不报错）
+    bool is_addr_filtered(Addr_t addr) const {
+        return addr_filter_mask_ != 0 && (addr & addr_filter_mask_) != 0;
+    }
 
     // ---- DPI-C 接口 ----
 
@@ -131,12 +175,27 @@ public:
                        uint32_t be_mask,
                        uint32_t data_cnt);
 
+    // rxsnp channel
+    void process_rxsnp(uint32_t mst_idx, uint32_t txnid,
+                       Addr_t addr, Timestamp_t req_time);
+
+    // soft reset
+    void check_soft_ctrl(bool soft_ctrl);
+
     // 统计引用
     ConsistencyChecker& get_checker() { return checker_; }
+
+    // Err flag in sv
+    void set_error();
+    void clr_error();
+    int get_error() const;
 
 private:
     ConsistencyChecker checker_;
     SeqNum_t           global_seq_;
+    bool               has_error_ = false;
+    bool               last_soft_ctrl_ = false;
+    uint64_t           addr_filter_mask_;  // 地址软过滤掩码
 
     // 线程安全锁（多通道 DPI 并发调用保护）
     std::mutex         mtx_;
@@ -147,11 +206,22 @@ private:
     // outstanding_reads_: (mst_idx, txnid) → 读请求
     std::unordered_map<MstKey, ChiOutstandingRead>  outstanding_reads_;
 
+    // outstanding_dataless_: (mst_idx, txnid) → 无数据事务
+    std::unordered_map<MstKey, ChiOutstandingDataless>  outstanding_dataless_;
+
+    // outstanding_snoops_: (mst_idx, txnid) → Snoop事务
+    std::unordered_map<MstKey, ChiOutstandingSnoop>  outstanding_snoops_;
+
     // dbid 逆向映射: {mst_idx, dbid} → 原始 txnid
     // 用于 txdat 时由 dbid 找回写请求
-    std::unordered_map<MstKey, uint32_t> dbid_to_txnid_;
+    std::unordered_map<MstKey, std::deque<uint32_t>> dbid_to_txnid_;
 
     // 内部辅助：从数据缓冲构建 Transaction 并提交
     void finalize_write(ChiOutstandingWrite& req, Timestamp_t resp_time);
     void finalize_read (ChiOutstandingRead&  req, Timestamp_t resp_time);
+    void finalize_snoop (ChiOutstandingSnoop&  req, Timestamp_t resp_time);
+
+    void try_finalize_write(std::unordered_map<MstKey, ChiOutstandingWrite>::iterator it);
+
+    void dump_outstanding_writes(uint32_t mst_idx) const;
 };

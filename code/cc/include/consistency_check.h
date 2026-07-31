@@ -28,9 +28,11 @@ public:
 
     // ---------- 处理写完成 ----------
     void process_write(const Transaction& txn);
+    void reset();
 
     // ---------- 处理读完成并检查 ----------
-    CheckReport process_read(const Transaction& txn);
+    //   relaxed: 为 true 时，数据不一致不计入 errors（软过滤地址）
+    CheckReport process_read(const Transaction& txn, bool relaxed = false);
 
     // ---------- 后门预加载 ----------
     // 加载 hex 文件到 shadow memory（不产生写历史）
@@ -43,11 +45,12 @@ public:
 
     // ---------- 统计 ----------
     struct Stats {
-        uint64_t total_reads  = 0;
-        uint64_t total_writes = 0;
-        uint64_t passes       = 0;
-        uint64_t errors       = 0;
-        uint64_t warnings     = 0;
+        uint64_t total_reads          = 0;
+        uint64_t total_writes         = 0;
+        uint64_t passes               = 0;
+        uint64_t errors               = 0;
+        uint64_t warnings             = 0;
+        uint64_t filtered_mismatches  = 0;  // 软过滤地址的数据不一致次数
     };
     const Stats& get_stats() const { return stats_; }
 
