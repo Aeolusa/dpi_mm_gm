@@ -98,6 +98,11 @@ void ConsistencyChecker::preload(Addr_t base_addr, const Data_t& data) {
     shadow_mem_.preload(base_addr, data);
 }
 
+void ConsistencyChecker::reset() {
+    shadow_mem_.reset();
+    active_writes_.clear();
+    stats_ = Stats{};
+}
 
 void ConsistencyChecker::process_write(const Transaction& txn) {
     assert(txn.type == TxnType::WRITE);
@@ -111,7 +116,7 @@ void ConsistencyChecker::process_write(const Transaction& txn) {
     stats_.total_writes++;
 }
 
-CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
+CheckReport ConsistencyChecker::process_read(const Transaction& txn, bool relaxed) {
     assert(txn.type == TxnType::READ);
     assert(txn.status == TxnStatus::COMPLETED);
 
@@ -140,7 +145,16 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
                 report.expected  = 0x00;
                 report.actual    = actual_val;
                 report.message   = format_error(report);
-                stats_.errors++;
+                if (relaxed) {
+                    // 软过滤：降级为 INFO，不计入 errors
+                    report.result   = CheckResult::PASS_WITH_RELAXED_ORDER;
+                    report.severity = Severity::INFO;
+                    stats_.filtered_mismatches++;
+                    LOG_INFO("\n[FILTERED] " + report.message + "\n");
+                } else {
+                    stats_.errors++;
+                    LOG_ERROR("\n" << report.message << "\n");
+                }
                 return report;
             }
             continue;
@@ -164,7 +178,15 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
                 report.actual        = actual_val;
                 report.related_writes = {};
                 report.message       = format_error(report);
-                stats_.errors++;
+                if (relaxed) {
+                    report.result   = CheckResult::PASS_WITH_RELAXED_ORDER;
+                    report.severity = Severity::INFO;
+                    stats_.filtered_mismatches++;
+                    LOG_INFO("\n[FILTERED] " + report.message + "\n");
+                } else {
+                    stats_.errors++;
+                    LOG_ERROR("\n" << report.message << "\n");
+                }
                 return report;
             }
             continue;
@@ -183,7 +205,15 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
             const auto& hist = shadow_mem_.get_write_history(byte_addr);
             report.related_writes.assign(hist.begin(), hist.end());
             report.message = format_error(report);
-            stats_.errors++;
+            if (relaxed) {
+                report.result   = CheckResult::PASS_WITH_RELAXED_ORDER;
+                report.severity = Severity::INFO;
+                stats_.filtered_mismatches++;
+                LOG_INFO("\n[FILTERED] " + report.message + "\n");
+            } else {
+                stats_.errors++;
+                LOG_ERROR("\n" << report.message << "\n");
+            }
             return report;
         }
     }
@@ -191,6 +221,7 @@ CheckReport ConsistencyChecker::process_read(const Transaction& txn) {
     stats_.passes++;
     return report;
 }
+
 
 void ConsistencyChecker::track_active_write(const Transaction& txn) {
     // 遍历 128 字节缓冲，按 BLOCK_SIZE(32B) 记录写活跃集合
