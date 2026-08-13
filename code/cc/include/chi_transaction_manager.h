@@ -36,6 +36,25 @@ struct MstKey {
     }
 };
 
+// ============================================================
+// DbidKey：用于 dbid 逆向映射的三元组键
+//   mst_idx : BFM实例编号
+//   dbid    : 分配的 DBID 值
+//   srcid   : rxrsp 中的 SrcID（= txdat 中的 TgtID）
+//   三维匹配: rxrsp.dbid == txdat.txnid && rxrsp.srcid == txdat.tgtid
+// ============================================================
+struct DbidKey {
+    uint32_t mst_idx;
+    uint32_t dbid;
+    uint32_t srcid;
+
+    bool operator==(const DbidKey& other) const {
+        return mst_idx == other.mst_idx &&
+               dbid   == other.dbid &&
+               srcid  == other.srcid;
+    }
+};
+
 namespace std {
     template <>
     struct hash<MstKey> {
@@ -43,6 +62,18 @@ namespace std {
             return hash<uint64_t>()(
                 (static_cast<uint64_t>(k.mst_idx) << 32) | k.txn_id
             );
+        }
+    };
+
+    template <>
+    struct hash<DbidKey> {
+        size_t operator()(const DbidKey& k) const {
+            // 组合三个字段的 hash
+            size_t h = hash<uint64_t>()(
+                (static_cast<uint64_t>(k.mst_idx) << 32) | k.dbid
+            );
+            h ^= hash<uint32_t>()(k.srcid) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
         }
     };
 }
@@ -54,7 +85,8 @@ namespace std {
 //   - 数据累积于 txdat (NCBWrData)，每笔按 dataid 放置
 // ============================================================
 struct ChiOutstandingWrite {
-    MstKey   key;           // {mst_idx, txn_id}
+    MstKey   key;           // {mst_idx, orig_txnid}
+    uint64_t write_id = 0;  // 内部唯一标识（不受 txnid 复用影响）
     Addr_t   addr;          // cacheline 对齐地址
     uint32_t opcode;        // 写 opcode (WriteNoSnpFull/Ptl)
     uint32_t secvec;        // 4-bit：哪些 32B 段有效
@@ -63,6 +95,7 @@ struct ChiOutstandingWrite {
 
     // DBID 阶段（rxrsp 后填充）
     uint32_t dbid        = 0;
+    uint32_t srcid       = 0;   // rxrsp.SrcID，用于与 txdat.TgtID 交叉校验
     bool     dbid_valid  = false;
     bool     comp_received = false;
     bool     data_complete = false;
@@ -157,16 +190,20 @@ public:
                        bool is_sm);
 
     // rxrsp 通道：DBIDResp / CompDBIDResp
+    //   srcid: rxrsp.SrcID，标识响应来源，用于与 txdat.TgtID 交叉校验
     void process_rxrsp_dbid(uint32_t mst_idx, uint32_t txn_id,
-                            uint32_t opcode, uint32_t dbid);
+                            uint32_t opcode, uint32_t dbid,
+                            uint32_t srcid);
 
     // txdat 通道：NCBWrData（写数据）
     //   txn_id 这里实际传入的是 dbid 值！
+    //   tgtid: txdat.TgtID，应等于 rxrsp.SrcID
     void process_txdat(uint32_t mst_idx, uint32_t txn_id_as_dbid,
                        uint32_t opcode, uint32_t dataid,
                        const uint8_t* flit_data,  // 32 bytes
                        uint32_t be_mask,           // 32-bit byte enable
-                       uint32_t data_cnt);
+                       uint32_t data_cnt,
+                       uint32_t tgtid);
 
     // rxdat 通道：CompData（读返回数据）
     void process_rxdat(uint32_t mst_idx, uint32_t txn_id,
@@ -200,8 +237,14 @@ private:
     // 线程安全锁（多通道 DPI 并发调用保护）
     std::mutex         mtx_;
 
-    // outstanding_writes_: (mst_idx, txnid) → 写请求
-    std::unordered_map<MstKey, ChiOutstandingWrite> outstanding_writes_;
+    // 写请求主存储: write_id → 写请求
+    // 使用内部唯一 write_id 做 key，避免 CHI txnid 复用导致覆盖
+    uint64_t next_write_id_ = 0;
+    std::unordered_map<uint64_t, ChiOutstandingWrite> outstanding_writes_;
+
+    // 阶段1索引: {mst_idx, txnid} → write_id
+    // 生命周期: txreq 时建立, DBIDResp 时删除（释放 txnid 允许复用）
+    std::unordered_map<MstKey, uint64_t> txnid_to_wid_;
 
     // outstanding_reads_: (mst_idx, txnid) → 读请求
     std::unordered_map<MstKey, ChiOutstandingRead>  outstanding_reads_;
@@ -212,16 +255,22 @@ private:
     // outstanding_snoops_: (mst_idx, txnid) → Snoop事务
     std::unordered_map<MstKey, ChiOutstandingSnoop>  outstanding_snoops_;
 
-    // dbid 逆向映射: {mst_idx, dbid} → 原始 txnid
-    // 用于 txdat 时由 dbid 找回写请求
-    std::unordered_map<MstKey, std::deque<uint32_t>> dbid_to_txnid_;
+    // 阶段2索引: {mst_idx, dbid, srcid} → write_id 队列
+    // 生命周期: DBIDResp 时建立, txdat data_complete 时释放
+    // txdat 通过 (mst_idx, dbid=txdat.txnid, tgtid) 查找 write_id
+    std::unordered_map<DbidKey, std::deque<uint64_t>> dbid_to_wid_;
 
     // 内部辅助：从数据缓冲构建 Transaction 并提交
     void finalize_write(ChiOutstandingWrite& req, Timestamp_t resp_time);
     void finalize_read (ChiOutstandingRead&  req, Timestamp_t resp_time);
     void finalize_snoop (ChiOutstandingSnoop&  req, Timestamp_t resp_time);
 
-    void try_finalize_write(std::unordered_map<MstKey, ChiOutstandingWrite>::iterator it);
+    void try_finalize_write(uint64_t write_id);
 
     void dump_outstanding_writes(uint32_t mst_idx) const;
+    void dump_dbid_map() const;
+
+public:
+    // 全量状态转储（可由 DPI 侧随时调用）
+    void dump_all_state() const;
 };

@@ -189,7 +189,7 @@ inline bool chi_is_snp_resp_data_opcode(int opcode) {
 // 从 secvec 计算有效 flit 数 (popcount)
 // secvec only valid in [3:0]
 #ifdef _MSC_VER
-#include <intrin.hyy>
+#include <intrin.h>
 inline uint32_t secvec_to_flits(uint32_t secvec) {
     return __popcnt(secvec & 0xF);
 }

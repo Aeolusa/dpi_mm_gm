@@ -41,10 +41,10 @@ protected:
         mgr_->process_txreq(mst, txnid, addr, /*size=*/5,
                             static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                             /*secvec=*/0x1, req_time, /*is_sm=*/false);
-        mgr_->process_rxrsp_dbid(mst, txnid, 0, dbid);
+        mgr_->process_rxrsp_dbid(mst, txnid, 0, dbid, /*srcid=*/0);
         auto wd = make_flit(fill_val);
         mgr_->process_txdat(mst, dbid, 0, /*dataid=*/0,
-                            wd.data(), 0xFFFFFFFF, /*data_cnt=*/0);
+                            wd.data(), 0xFFFFFFFF, /*data_cnt=*/0, /*tgtid=*/0);
     }
 
     // 辅助：完整的单 flit 读事务（txreq → rxdat），返回 checker stats
@@ -293,7 +293,7 @@ TEST_F(AddrTruncationTest, FullCachelineWriteHighAddr) {
     mgr_->process_txreq(mst, wtxn, addr, /*size=*/7,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         /*secvec=*/0xF, 100, /*is_sm=*/false);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     // 写 4 笔 flit，每段填充不同 pattern
     uint32_t dataids[] = {0, 2, 4, 6};
@@ -301,7 +301,7 @@ TEST_F(AddrTruncationTest, FullCachelineWriteHighAddr) {
     for (int i = 0; i < 4; ++i) {
         wflits[i].fill(static_cast<uint8_t>(0xC0 + i));
         mgr_->process_txdat(mst, dbid, 0, dataids[i],
-                            wflits[i].data(), 0xFFFFFFFF, 0);
+                            wflits[i].data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
     }
 
     // 读回全 cacheline

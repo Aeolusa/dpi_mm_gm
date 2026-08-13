@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.14)
 project(MemConsistencyRefModel CXX)
 set(CMAKE_CXX_STANDARD 17)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
+set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
 # 头文件
 include_directories(code/cc/include)
 
@@ -27,14 +33,14 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_executable(run_tests
+add_executable(refmodel_tests
     code/cc/test/unit_test_shadow_mem.cc
     code/cc/test/unit_test_checker.cc
     code/cc/test/integration_test.cc
     code/cc/test/test_addr_truncation.cc
 )
-target_link_libraries(run_tests refmodel gtest_main)
-add_test(NAME AllTests COMMAND run_tests)
+target_link_libraries(refmodel_tests refmodel gtest_main)
+add_test(NAME AllTests COMMAND refmodel_tests)
 
 # 独立地址截断诊断测试（无 GTest 依赖，可在内网服务器编译）
 add_executable(addr_test

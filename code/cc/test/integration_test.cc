@@ -48,10 +48,10 @@ TEST_F(IntegrationTest, NormalWriteReadFlow) {
     mgr_->process_txreq(mst, wtxn, addr, 5,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0x1, 100, /*is_sm=*/false);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     auto wd = make_flit(0xDE, 0xAD, 0xBE, 0xEF);
-    mgr_->process_txdat(mst, dbid, 0, /*dataid=*/0, wd.data(), 0xF, /*data_cnt=*/0);
+    mgr_->process_txdat(mst, dbid, 0, /*dataid=*/0, wd.data(), 0xF, /*data_cnt=*/0, /*tgtid=*/0);
 
     // Read back
     mgr_->process_txreq(mst, rtxn, addr, 5,
@@ -90,11 +90,11 @@ TEST_F(IntegrationTest, PartialWriteReadFlow) {
     mgr_->process_txreq(mst, wtxn, addr, 5,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpPtl),
                         0x1, 100, false);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     auto wd = make_flit(0xAA, 0xBB, 0xCC, 0xDD);
     // Only enable byte 0 and 2
-    mgr_->process_txdat(mst, dbid, 0, 0, wd.data(), 0x5, 0);
+    mgr_->process_txdat(mst, dbid, 0, 0, wd.data(), 0x5, 0, /*tgtid=*/0);
 
     // Read: expect 0xAA at byte0, 0x00 at byte1, 0xCC at byte2
     mgr_->process_txreq(mst, rtxn, addr, 5,
@@ -122,11 +122,11 @@ TEST_F(IntegrationTest, StressTestFlow) {
         mgr_->process_txreq(mst, txnid, addr, 5,
                             static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                             0x1, 100 + i, false);
-        mgr_->process_rxrsp_dbid(mst, txnid, 0, dbid);
+        mgr_->process_rxrsp_dbid(mst, txnid, 0, dbid, /*srcid=*/0);
 
-        auto wd = make_flit(static_cast<uint8_t>(i & 0xFF));
+        auto wd = make_flit(0);
         wd[0] = static_cast<uint8_t>(i & 0xFF);
-        mgr_->process_txdat(mst, dbid, 0, 0, wd.data(), 0x1, 0);
+        mgr_->process_txdat(mst, dbid, 0, 0, wd.data(), 0x1, 0, /*tgtid=*/0);
     }
 
     for (int i = 0; i < N; ++i) {
@@ -136,7 +136,7 @@ TEST_F(IntegrationTest, StressTestFlow) {
         mgr_->process_txreq(mst, txnid, addr, 5,
                             static_cast<uint32_t>(ChiReqOpcode::ReadNoSnp),
                             0x1, 1000 + i, false);
-        auto rd = make_flit(static_cast<uint8_t>(i & 0xFF));
+        auto rd = make_flit(0);
         rd[0] = static_cast<uint8_t>(i & 0xFF);
         mgr_->process_rxdat(mst, txnid, 0, 0, rd.data(), 0x1, 0);
     }
@@ -157,12 +157,12 @@ TEST_F(IntegrationTest, Size6TwoFlits) {
     mgr_->process_txreq(mst, wtxn, addr, 6,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0x3, 100, false);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     auto flit0 = make_flit(0xAA);  // dataid=0 → offset 0
     auto flit1 = make_flit(0xBB);  // dataid=2 → offset 32
-    mgr_->process_txdat(mst, dbid, 0, /*dataid=*/0, flit0.data(), 0xFFFFFFFF, 0);
-    mgr_->process_txdat(mst, dbid, 0, /*dataid=*/2, flit1.data(), 0xFFFFFFFF, 0);
+    mgr_->process_txdat(mst, dbid, 0, /*dataid=*/0, flit0.data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
+    mgr_->process_txdat(mst, dbid, 0, /*dataid=*/2, flit1.data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
 
     // Read back with 2 flits
     mgr_->process_txreq(mst, rtxn, addr, 6,
@@ -187,7 +187,7 @@ TEST_F(IntegrationTest, Size7FourFlitsFullCacheline) {
     mgr_->process_txreq(mst, wtxn, addr, 7,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0xF, 100, false);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     // 写 4 笔 flit，每笔填充不同 pattern
     std::array<uint8_t, 32> flits[4];
@@ -195,7 +195,7 @@ TEST_F(IntegrationTest, Size7FourFlitsFullCacheline) {
     for (int i = 0; i < 4; ++i) {
         flits[i].fill(static_cast<uint8_t>(0x10 * (i + 1)));
         mgr_->process_txdat(mst, dbid, 0, dataids[i],
-                            flits[i].data(), 0xFFFFFFFF, 0);
+                            flits[i].data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
     }
 
     // 读回 4 笔 flit
@@ -223,18 +223,18 @@ TEST_F(IntegrationTest, SmWriteWithDataCnt) {
     mgr_->process_txreq(mst, wtxn, addr, 7,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0x5, 100, /*is_sm=*/true);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     // 首笔 txdat 的 data_cnt=3 → 覆盖 expected_flits 为 3
     auto flit0 = make_flit(0xAA);
     auto flit1 = make_flit(0xBB);
     auto flit2 = make_flit(0xCC);
     mgr_->process_txdat(mst, dbid, 0, /*dataid=*/0, flit0.data(), 0xFFFFFFFF,
-                        /*data_cnt=*/3);
+                        /*data_cnt=*/3, /*tgtid=*/0);
     mgr_->process_txdat(mst, dbid, 0, /*dataid=*/2, flit1.data(), 0xFFFFFFFF,
-                        /*data_cnt=*/3);
+                        /*data_cnt=*/3, /*tgtid=*/0);
     mgr_->process_txdat(mst, dbid, 0, /*dataid=*/4, flit2.data(), 0xFFFFFFFF,
-                        /*data_cnt=*/3);
+                        /*data_cnt=*/3, /*tgtid=*/0);
 
     // 读回验证（读用 size=7 → 4 flits，但只验证写入的 3 段）
     mgr_->process_txreq(mst, rtxn, addr, 7,
@@ -263,10 +263,10 @@ TEST_F(IntegrationTest, SmWriteSingleFlit) {
     mgr_->process_txreq(mst, wtxn, addr, 5,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0x1, 100, true);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     auto flit0 = make_flit(0x55);
-    mgr_->process_txdat(mst, dbid, 0, 0, flit0.data(), 0xFFFFFFFF, /*data_cnt=*/1);
+    mgr_->process_txdat(mst, dbid, 0, 0, flit0.data(), 0xFFFFFFFF, /*data_cnt=*/1, /*tgtid=*/0);
 
     // Read verify
     mgr_->process_txreq(mst, rtxn, addr, 5,
@@ -276,6 +276,65 @@ TEST_F(IntegrationTest, SmWriteSingleFlit) {
 
     auto s = mgr_->get_checker().get_stats();
     EXPECT_EQ(s.passes, 1);
+    EXPECT_EQ(s.errors, 0);
+}
+
+// ============================================================
+// CHI TxnID 复用场景测试（对应 Bug 现场）
+//   t0: txreq addr=a, txnid=89 (is_sm=false)
+//   t1: rxrsp CompDBIDResp txnid=89, dbid=3, srcid=0xd4
+//   t2: txreq addr=b, txnid=89
+//   t3: rxrsp CompDBIDResp txnid=89, dbid=1, srcid=0xf3
+//   t4: txdat txnid=3 (dbid), tgtid=0xd4 -> 对应 addr_a
+//   t5: txdat txnid=1 (dbid), tgtid=0xf3 -> 对应 addr_b
+// ============================================================
+TEST_F(IntegrationTest, TxnIdReuseFlow) {
+    uint32_t mst = 0, txnid = 89;
+    Addr_t addr_a = 0x10000;
+    Addr_t addr_b = 0x20000;
+
+    // t0: Write NoSnp to addr_a with txnid=89
+    mgr_->process_txreq(mst, txnid, addr_a, 5,
+                        static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
+                        0x1, 100, false);
+
+    // t1: CompDBIDResp for addr_a, dbid=3, srcid=0xd4 (CompDBIDResp opcode = 5)
+    mgr_->process_rxrsp_dbid(mst, txnid, 5, 3, 0xd4);
+
+    // t2: Write NoSnp to addr_b with txnid=89 (TxnID reuse!)
+    mgr_->process_txreq(mst, txnid, addr_b, 5,
+                        static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
+                        0x1, 110, false);
+
+    // t3: CompDBIDResp for addr_b, dbid=1, srcid=0xf3
+    mgr_->process_rxrsp_dbid(mst, txnid, 5, 1, 0xf3);
+
+    // t4: txdat for dbid=3, tgtid=0xd4 (addr_a)
+    auto flit_a = make_flit(0xAA);
+    mgr_->process_txdat(mst, 3, 0, 0, flit_a.data(), 0xFFFFFFFF, 0, 0xd4);
+
+    // t5: txdat for dbid=1, tgtid=0xf3 (addr_b)
+    auto flit_b = make_flit(0xBB);
+    mgr_->process_txdat(mst, 1, 0, 0, flit_b.data(), 0xFFFFFFFF, 0, 0xf3);
+
+    // Verify checker states
+    auto s = mgr_->get_checker().get_stats();
+    EXPECT_EQ(s.errors, 0);
+
+    // Read back addr_a
+    mgr_->process_txreq(mst, 90, addr_a, 5,
+                        static_cast<uint32_t>(ChiReqOpcode::ReadNoSnp),
+                        0x1, 200, false);
+    mgr_->process_rxdat(mst, 90, 0, 0, flit_a.data(), 0xFFFFFFFF, 0);
+
+    // Read back addr_b
+    mgr_->process_txreq(mst, 91, addr_b, 5,
+                        static_cast<uint32_t>(ChiReqOpcode::ReadNoSnp),
+                        0x1, 210, false);
+    mgr_->process_rxdat(mst, 91, 0, 0, flit_b.data(), 0xFFFFFFFF, 0);
+
+    s = mgr_->get_checker().get_stats();
+    EXPECT_EQ(s.passes, 2);
     EXPECT_EQ(s.errors, 0);
 }
 
@@ -291,7 +350,7 @@ TEST_F(IntegrationTest, DataidOffsetMapping) {
     mgr_->process_txreq(mst, wtxn, addr, 7,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0xF, 100, false);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     // 每段 32B 填充 dataid 值本身作为 pattern
     uint32_t ids[] = {0, 2, 4, 6};
@@ -299,7 +358,7 @@ TEST_F(IntegrationTest, DataidOffsetMapping) {
     for (int i = 0; i < 4; ++i) {
         wflits[i].fill(static_cast<uint8_t>(ids[i]));
         mgr_->process_txdat(mst, dbid, 0, ids[i],
-                            wflits[i].data(), 0xFFFFFFFF, 0);
+                            wflits[i].data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
     }
 
     // 读回：故意用乱序 dataid 到达
@@ -329,12 +388,12 @@ TEST_F(IntegrationTest, SmNonContiguousSecvec) {
     mgr_->process_txreq(mst, wtxn, addr, 7,
                         static_cast<uint32_t>(ChiReqOpcode::WriteNoSnpFull),
                         0xA, 100, true);
-    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid);
+    mgr_->process_rxrsp_dbid(mst, wtxn, 0, dbid, /*srcid=*/0);
 
     auto flit_seg1 = make_flit(0x11);  // dataid=2 → offset 32
     auto flit_seg3 = make_flit(0x33);  // dataid=6 → offset 96
-    mgr_->process_txdat(mst, dbid, 0, 2, flit_seg1.data(), 0xFFFFFFFF, /*data_cnt=*/2);
-    mgr_->process_txdat(mst, dbid, 0, 6, flit_seg3.data(), 0xFFFFFFFF, /*data_cnt=*/2);
+    mgr_->process_txdat(mst, dbid, 0, 2, flit_seg1.data(), 0xFFFFFFFF, /*data_cnt=*/2, /*tgtid=*/0);
+    mgr_->process_txdat(mst, dbid, 0, 6, flit_seg3.data(), 0xFFFFFFFF, /*data_cnt=*/2, /*tgtid=*/0);
 
     // 读回全 cacheline（size=7 → 4 flits）
     mgr_->process_txreq(mst, rtxn, addr, 7,
@@ -369,14 +428,14 @@ TEST_F(IntegrationTest, MultiMasterInterleaved) {
                         0x1, 101, false);
 
     // DBID responses interleaved
-    mgr_->process_rxrsp_dbid(mst_b, 1, 0, /*dbid=*/200);
-    mgr_->process_rxrsp_dbid(mst_a, 1, 0, /*dbid=*/201);
+    mgr_->process_rxrsp_dbid(mst_b, 1, 0, /*dbid=*/200, /*srcid=*/0);
+    mgr_->process_rxrsp_dbid(mst_a, 1, 0, /*dbid=*/201, /*srcid=*/0);
 
     // Data interleaved
     auto wd_a = make_flit(0xAA);
     auto wd_b = make_flit(0xBB);
-    mgr_->process_txdat(mst_b, 200, 0, 0, wd_b.data(), 0xFFFFFFFF, 0);
-    mgr_->process_txdat(mst_a, 201, 0, 0, wd_a.data(), 0xFFFFFFFF, 0);
+    mgr_->process_txdat(mst_b, 200, 0, 0, wd_b.data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
+    mgr_->process_txdat(mst_a, 201, 0, 0, wd_a.data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
 
     // Read back from each address
     mgr_->process_txreq(mst_a, 2, addr, 5,

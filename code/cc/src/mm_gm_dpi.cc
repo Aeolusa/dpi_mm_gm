@@ -79,6 +79,9 @@ static void extract_bits_to_array(const uint32_t* flit, int high, int low, uint8
 #define RSP_OPCODE_L 27
 #define RSP_DBID_H 46
 #define RSP_DBID_L 35
+// TODO: 确认 SM RSP flit 中 SrcID 的实际 bit 位置
+#define RSP_SRCID_H 14
+#define RSP_SRCID_L 3
 
 #define TXDAT_TXNID_H 26
 #define TXDAT_TXNID_L 15
@@ -92,6 +95,9 @@ static void extract_bits_to_array(const uint32_t* flit, int high, int low, uint8
 #define TXDAT_DATA_L 35
 #define TXDAT_DATA_CNT_H 325
 #define TXDAT_DATA_CNT_L 324
+// TODO: 确认 SM TXDAT flit 中 TgtID 的实际 bit 位置
+#define TXDAT_TGTID_H 14
+#define TXDAT_TGTID_L 3
 
 #define RXDAT_TXNID_H 15
 #define RXDAT_TXNID_L 4
@@ -113,7 +119,7 @@ static void extract_bits_to_array(const uint32_t* flit, int high, int low, uint8
 #define HST_REQ_SIZE_L 69
 #define HST_REQ_SECVEC_H 220
 #define HST_REQ_SECVEC_L 217
-#define HST_REQ_ADDR_H 127
+#define HST_REQ_ADDR_H 126
 #define HST_REQ_ADDR_L 73
 
 #define HST_RSP_TXNID_H 37
@@ -122,6 +128,9 @@ static void extract_bits_to_array(const uint32_t* flit, int high, int low, uint8
 #define HST_RSP_OPCODE_L 38
 #define HST_RSP_DBID_H 65
 #define HST_RSP_DBID_L 54
+// TODO: 确认 HOST RSP flit 中 SrcID 的实际 bit 位置
+#define HST_RSP_SRCID_H 25
+#define HST_RSP_SRCID_L 15
 
 #define HST_DAT_TXNID_H 37
 #define HST_DAT_TXNID_L 26
@@ -133,6 +142,9 @@ static void extract_bits_to_array(const uint32_t* flit, int high, int low, uint8
 #define HST_DAT_BE_L 103
 #define HST_DAT_DATA_H 391
 #define HST_DAT_DATA_L 135
+// TODO: 确认 HOST TXDAT flit 中 TgtID 的实际 bit 位置
+#define HST_DAT_TGTID_H 25
+#define HST_DAT_TGTID_L 15
 
 #define HST_SNP_TXNID_H 26
 #define HST_SNP_TXNID_L 15
@@ -236,11 +248,9 @@ void dpi_chi_txreq(int mst_idx, int txnid, long long addr,
                    int is_fabric_chi, const uint32_t* flit)
 {
     if (!g_mgr) return;
-    if (g_cfg.enable_soft_ctrl) {
-        g_mgr->check_soft_ctrl(soft_ctrl != 0);
-    }
+    g_mgr->check_soft_ctrl(g_cfg.enable_soft_ctrl);
 
-    if (soft_ctrl) {
+    if (g_cfg.enable_soft_ctrl) {
         if (is_fabric_chi) {
             txnid = extract_bits(flit, HST_REQ_TXNID_H, HST_REQ_TXNID_L);
             opcode = extract_bits(flit, HST_REQ_OPCODE_H, HST_REQ_OPCODE_L);
@@ -272,26 +282,29 @@ void dpi_chi_txreq(int mst_idx, int txnid, long long addr,
 //   txnid  : rxrsp.txnid（匹配 txreq.txnid）
 //   opcode : 3-bit RSPOPCODE
 //   dbid   : 12-bit DBID
-void dpi_chi_rxrsp_dbid(int mst_idx, int txnid, int opcode, int dbid, int soft_ctrl, int is_fabric_chi, const uint32_t* flit)
+void dpi_chi_rxrsp_dbid(int mst_idx, int txnid, int opcode, int dbid, int srcid, int soft_ctrl, int is_fabric_chi, const uint32_t* flit)
 {
     if (!g_mgr) return;
-    g_mgr->check_soft_ctrl(soft_ctrl != 0);
-    if (soft_ctrl) {
+    g_mgr->check_soft_ctrl(g_cfg.enable_soft_ctrl);
+    if (g_cfg.enable_soft_ctrl) {
         if (is_fabric_chi) {
             txnid = extract_bits(flit, HST_RSP_TXNID_H, HST_RSP_TXNID_L);
             opcode = extract_bits(flit, HST_RSP_OPCODE_H, HST_RSP_OPCODE_L);
             dbid = extract_bits(flit, HST_RSP_DBID_H, HST_RSP_DBID_L);
+            srcid = extract_bits(flit, HST_RSP_SRCID_H, HST_RSP_SRCID_L);
         } else {
             txnid = extract_bits(flit, RSP_TXNID_H, RSP_TXNID_L);
             opcode = extract_bits(flit, RSP_OPCODE_H, RSP_OPCODE_L);
             dbid = extract_bits(flit, RSP_DBID_H, RSP_DBID_L);
+            srcid = extract_bits(flit, RSP_SRCID_H, RSP_SRCID_L);
         }
     }
     g_mgr->process_rxrsp_dbid(
         static_cast<uint32_t>(mst_idx),
         static_cast<uint32_t>(txnid),
         static_cast<uint32_t>(opcode),
-        static_cast<uint32_t>(dbid)
+        static_cast<uint32_t>(dbid),
+        static_cast<uint32_t>(srcid)
     );
 }
 
@@ -304,18 +317,19 @@ void dpi_chi_rxrsp_dbid(int mst_idx, int txnid, int opcode, int dbid, int soft_c
 //   data_cnt : SM 专用，表示本次事务总flit数；其他类型传0
 void dpi_chi_txdat(int mst_idx, int txnid, int opcode,
                    int dataid, const uint32_t* data,
-                   int be, int data_cnt, int soft_ctrl, int is_fabric_chi, const uint32_t* flit)
+                   int be, int data_cnt, int tgtid, int soft_ctrl, int is_fabric_chi, const uint32_t* flit)
 {
     if (!g_mgr) return;
-    g_mgr->check_soft_ctrl(soft_ctrl != 0);
+    g_mgr->check_soft_ctrl(g_cfg.enable_soft_ctrl);
     uint8_t flit_bytes[32];
-    if (soft_ctrl) {
+    if (g_cfg.enable_soft_ctrl) {
         if (is_fabric_chi) {
             txnid = extract_bits(flit, HST_DAT_TXNID_H, HST_DAT_TXNID_L);
             opcode = extract_bits(flit, HST_DAT_OPCODE_H, HST_DAT_OPCODE_L);
             dataid = extract_bits(flit, HST_DAT_DATAID_H, HST_DAT_DATAID_L);
             be = extract_bits(flit, HST_DAT_BE_H, HST_DAT_BE_L);
             data_cnt = extract_bits(flit, TXDAT_DATA_CNT_H, TXDAT_DATA_CNT_L);
+            tgtid = extract_bits(flit, HST_DAT_TGTID_H, HST_DAT_TGTID_L);
             extract_bits_to_array(flit, HST_DAT_DATA_H, HST_DAT_DATA_L, flit_bytes, 32);
         } else {
             txnid = extract_bits(flit, TXDAT_TXNID_H, TXDAT_TXNID_L);
@@ -323,6 +337,7 @@ void dpi_chi_txdat(int mst_idx, int txnid, int opcode,
             dataid = extract_bits(flit, TXDAT_DATAID_H, TXDAT_DATAID_L);
             be = extract_bits(flit, TXDAT_BE_H, TXDAT_BE_L);
             data_cnt = extract_bits(flit, TXDAT_DATA_CNT_H, TXDAT_DATA_CNT_L);
+            tgtid = extract_bits(flit, TXDAT_TGTID_H, TXDAT_TGTID_L);
             extract_bits_to_array(flit, TXDAT_DATA_H, TXDAT_DATA_L, flit_bytes, 32);
         }
     } else {
@@ -336,7 +351,8 @@ void dpi_chi_txdat(int mst_idx, int txnid, int opcode,
         static_cast<uint32_t>(dataid),
         flit_bytes,
         static_cast<uint32_t>(be),
-        static_cast<uint32_t>(data_cnt)
+        static_cast<uint32_t>(data_cnt),
+        static_cast<uint32_t>(tgtid)
     );
 }
 
@@ -349,9 +365,9 @@ void dpi_chi_rxdat(int mst_idx, int txnid, int opcode,
                    int be, int data_cnt, int soft_ctrl, int is_fabric_chi, const uint32_t* flit)
 {
     if (!g_mgr) return;
-    g_mgr->check_soft_ctrl(soft_ctrl != 0);
+    g_mgr->check_soft_ctrl(g_cfg.enable_soft_ctrl);
     uint8_t flit_bytes[32];
-    if (soft_ctrl) {
+    if (g_cfg.enable_soft_ctrl) {
         if (is_fabric_chi) {
             txnid = extract_bits(flit, HST_DAT_TXNID_H, HST_DAT_TXNID_L);
             opcode = extract_bits(flit, HST_DAT_OPCODE_H, HST_DAT_OPCODE_L);
@@ -386,8 +402,8 @@ void dpi_chi_rxsnp( int mst_idx, int txnid, long long addr,
                     long long req_time, int soft_ctrl, int is_hst, const uint32_t* flit)
 {
     if (!g_mgr) return;
-    g_mgr->check_soft_ctrl(soft_ctrl != 0);
-    if (soft_ctrl) {
+    g_mgr->check_soft_ctrl(g_cfg.enable_soft_ctrl);
+    if (g_cfg.enable_soft_ctrl) {
         if (is_hst) {
             txnid = extract_bits(flit, HST_SNP_TXNID_H, HST_SNP_TXNID_L);
             addr = extract_bits(flit, HST_SNP_ADDR_H, HST_SNP_ADDR_L);
@@ -437,6 +453,13 @@ void refmodel_finish() {
         Logger::instance().disable_file_output();
         delete g_mgr;
         g_mgr = nullptr;
+    }
+}
+
+// ---- 全量状态转储（可由SV侧随时调用） ----
+void refmodel_dump_state() {
+    if (g_mgr) {
+        g_mgr->dump_all_state();
     }
 }
 

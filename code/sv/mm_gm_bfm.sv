@@ -76,13 +76,14 @@ module mm_gm_bfm #(
         input int txnid, 
         input int opcode,
         input int dbid,
+        input int srcid,
         input bit soft_ctrl,
         input bit is_fabric_chi,
         input bit [511:0] flit
     );
 
     // txdat：发送写数据 NCBWrData
-    //   注意：txnid 字段在 CHI 中实际携带 dbid 值
+    //   注意：txnid 字段在 CHI 中实际携带dbid 值
     import "DPI-C" function void dpi_chi_txdat(
         input int mst_idx,
         input int txnid,
@@ -91,6 +92,7 @@ module mm_gm_bfm #(
         input bit [255:0] data, 
         input int be, 
         input int data_cnt,
+        input int tgtid,
         input bit soft_ctrl,
         input bit is_fabric_chi,
         input bit [511:0] flit
@@ -146,6 +148,7 @@ module mm_gm_bfm #(
         logic [TXNID_W-1:0]     txnid;
         logic [RSPOPCODE_W-1:0] opcode;
         logic [DBID_W-1:0]      dbid;
+        logic [TXNID_W-1:0]     srcid;  // rxrsp.SrcID，用于与 txdat.TgtID 交叉校验
     } rsp_t;
 
     typedef struct packed {
@@ -155,6 +158,7 @@ module mm_gm_bfm #(
         logic [BE_W-1:0]        be;
         logic [255:0]           data;
         logic [5:0]             data_cnt;
+        logic [TXNID_W-1:0]     tgtid;  // txdat.TgtID，应等于 rxrsp.SrcID
     } dat_t;
 
     // ---- Flit 解析函数 ----
@@ -173,6 +177,7 @@ module mm_gm_bfm #(
         rsp.txnid   = rsp_flit[`RSP_TXNID];
         rsp.opcode  = rsp_flit[`RSP_OPCODE];
         rsp.dbid    = rsp_flit[`RSP_DBID];
+        rsp.srcid   = '0;  // TODO: 填充实际的 RSP SrcID bit位置
         return rsp;
     endfunction
 
@@ -184,6 +189,7 @@ module mm_gm_bfm #(
         dat.be          = dat_flit[`DAT_BE];
         dat.data        = dat_flit[`DAT_DATA];
         dat.data_cnt    = dat_flit[`DAT_DATA_CNT];
+        dat.tgtid       = '0;  // TODO: 填充实际的 TXDAT TgtID bit位置
         return dat;
     endfunction
 
@@ -229,6 +235,7 @@ module mm_gm_bfm #(
                     rxrsp[i].txnid,
                     rxrsp[i].opcode,
                     rxrsp[i].dbid,
+                    rxrsp[i].srcid,
                     soft_ctrl,
                     IS_FABRIC_CHI,
                     512'(rxrsp_flit[i])
@@ -256,6 +263,7 @@ module mm_gm_bfm #(
                     txdat[i].data,
                     txdat[i].be,
                     txdat[i].data_cnt,
+                    txdat[i].tgtid,
                     soft_ctrl,
                     IS_FABRIC_CHI,
                     512'(txdat_flit[i])

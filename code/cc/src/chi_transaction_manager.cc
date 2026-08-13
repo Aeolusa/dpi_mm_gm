@@ -35,9 +35,11 @@ void ChiTransactionManager::check_soft_ctrl(bool soft_ctrl) {
         LOG_INFO("[CHI MGR] Using soft ctrl & GM reset\n");
         outstanding_reads_.clear();
         outstanding_writes_.clear();
+        txnid_to_wid_.clear();
+        dbid_to_wid_.clear();
         outstanding_dataless_.clear();
         outstanding_snoops_.clear();
-        dbid_to_txnid_.clear();
+        next_write_id_ = 0;
         global_seq_ = 1;
         has_error_ = false;
         checker_.reset();
@@ -283,7 +285,7 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
 
     } else if (chi_is_write_opcode(opcode)) {
         // ---- 写请求 ----
-        if (outstanding_writes_.count(key)) {
+        if (txnid_to_wid_.count(key)) {
             LOG_DEBUG("[CHI MGR] WARN: duplicate txreq write "
                       << "mst=" << get_mst_name(mst_idx) << " txnid=" << txn_id << "\n");
         }
@@ -295,6 +297,7 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
 
         ChiOutstandingWrite req{};
         req.key             = key;
+        req.write_id        = next_write_id_++;
         req.addr            = addr;
         req.opcode          = opcode;
         req.secvec          = secvec;
@@ -303,7 +306,8 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
         req.expected_flits  = exp_flits;
         req.req_time        = req_time;
         req.filtered        = is_addr_filtered(addr);
-        outstanding_writes_[key] = req;
+        outstanding_writes_[req.write_id] = req;
+        txnid_to_wid_[key] = req.write_id;
     
     } else if (chi_is_dataless_opcode(opcode)) {
         if (outstanding_dataless_.count(key)) {
@@ -331,16 +335,23 @@ void ChiTransactionManager::process_txreq(uint32_t mst_idx, uint32_t txn_id,
 // ============================================================
 // process_rxrsp_dbid: 由 rxrsp_flitv 触发
 //   rxrsp.txnid 匹配 txreq.txnid（同一 mst 内）
-//   存储 dbid，建立 (mst_idx, dbid) → txnid 逆向映射
+//   存储 dbid + srcid，建立 (mst_idx, dbid, srcid) → txnid 逆向映射
 // ============================================================
 void ChiTransactionManager::process_rxrsp_dbid(uint32_t mst_idx,
                                                 uint32_t txn_id,
                                                 uint32_t opcode,
-                                                uint32_t dbid)
+                                                uint32_t dbid,
+                                                uint32_t srcid)
 {
     std::lock_guard<std::mutex> lock(mtx_);
 
-    if (chi_is_rsplcrdreturn(opcode)) return;
+    if (chi_is_rsplcrdreturn(opcode)) {
+        MstKey key = {mst_idx, txn_id};
+        if (txnid_to_wid_.find(key) == txnid_to_wid_.end() &&
+            outstanding_dataless_.find(key) == outstanding_dataless_.end()) {
+            return;
+        }
+    }
 
     if (chi_is_comp_rsp_opcode(opcode)) {
         MstKey key = {mst_idx, txn_id};
@@ -352,33 +363,56 @@ void ChiTransactionManager::process_rxrsp_dbid(uint32_t mst_idx,
             outstanding_dataless_.erase(it);
         } else {
             // Try to find (DBIDResp + Comp) in in-fly write transaction
-            auto wit = outstanding_writes_.find(key);
-            if (wit != outstanding_writes_.end()) {
-                wit->second.comp_received = true;
-                LOG_INFO("[CHI MGR] Write Comp received: mst=" << get_mst_name(mst_idx)
-                         << " txnid=" << std::hex << txn_id 
-                         << " data_complete=" << wit->second.data_complete << "\n");
-                try_finalize_write(wit);
+            // 优先查 txnid 索引（DBIDResp 尚未到达）
+            auto tid_it = txnid_to_wid_.find(key);
+            if (tid_it != txnid_to_wid_.end()) {
+                uint64_t wid = tid_it->second;
+                auto wit = outstanding_writes_.find(wid);
+                if (wit != outstanding_writes_.end()) {
+                    wit->second.comp_received = true;
+                    LOG_INFO("[CHI MGR] Write Comp received: mst=" << get_mst_name(mst_idx)
+                             << " txnid=" << std::hex << txn_id
+                             << " wid=" << std::dec << wid
+                             << " data_complete=" << wit->second.data_complete << "\n");
+                    try_finalize_write(wid);
+                }
             } else {
-                LOG_ERROR("[CHI MGR] ERROR: rxrsp Comp cannot find dataless/write req" 
-                         << " mst=" << get_mst_name(mst_idx)
-                         << " txnid=" << std::hex << txn_id << "\n");
-                set_error();
+                // Fallback: txnid 已被释放（DBIDResp 先到），线性搜索
+                bool found = false;
+                for (auto& [wid, req] : outstanding_writes_) {
+                    if (req.key.mst_idx == mst_idx && req.key.txn_id == txn_id
+                        && !req.comp_received) {
+                        req.comp_received = true;
+                        LOG_INFO("[CHI MGR] Write Comp received (fallback): mst=" << get_mst_name(mst_idx)
+                                 << " txnid=" << std::hex << txn_id
+                                 << " wid=" << std::dec << wid
+                                 << " data_complete=" << req.data_complete << "\n");
+                        try_finalize_write(wid);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    LOG_ERROR("[CHI MGR] ERROR: rxrsp Comp cannot find dataless/write req"
+                             << " mst=" << get_mst_name(mst_idx)
+                             << " txnid=" << std::hex << txn_id << "\n");
+                    set_error();
+                }
             }
         }
         return;
     }
 
     if (opcode != 0 && !chi_is_dbid_rsp_opcode(opcode)) {
-        LOG_ERROR("[CHI MGR] ERROR: unknown rxrsp opcode=0x " 
+        LOG_ERROR("[CHI MGR] ERROR: unknown rxrsp opcode=0x "
                     << std::hex << opcode << std::dec
                     << " mst=" << get_mst_name(mst_idx) << " txnid=" << txn_id << " dbid=" << dbid << "\n");
         set_error();
     }
 
     MstKey key = {mst_idx, txn_id};
-    auto it = outstanding_writes_.find(key);
-    if (it == outstanding_writes_.end()) {
+    auto tid_it = txnid_to_wid_.find(key);
+    if (tid_it == txnid_to_wid_.end()) {
         LOG_ERROR("[CHI MGR] ERROR: rxrsp cannot find write "
                   << "mst=" << get_mst_name(mst_idx) << " txnid=" << std::hex << txn_id << "\n");
         dump_outstanding_writes(mst_idx);
@@ -386,24 +420,58 @@ void ChiTransactionManager::process_rxrsp_dbid(uint32_t mst_idx,
         return;
     }
 
+    uint64_t wid = tid_it->second;
+    auto it = outstanding_writes_.find(wid);
+    if (it == outstanding_writes_.end()) {
+        LOG_ERROR("[CHI MGR] ERROR: rxrsp txnid_to_wid_ has wid=" << wid
+                  << " but no entry in outstanding_writes_"
+                  << " mst=" << get_mst_name(mst_idx) << " txnid=" << std::hex << txn_id << "\n");
+        set_error();
+        txnid_to_wid_.erase(tid_it);
+        return;
+    }
+
     it->second.dbid       = dbid;
+    it->second.srcid      = srcid;
     it->second.dbid_valid = true;
 
-    if (opcode == static_cast<int>(ChiRspOpocde::CompDBIDResp) ||
+    if (opcode == 0 ||
+        opcode == static_cast<int>(ChiRspOpocde::CompDBIDResp) ||
         opcode == static_cast<int>(ChiRspOpocde::Host_CompDBIDResp)) {
         it->second.comp_received = true;
     }
 
-    // 建立逆向映射: {mst_idx, dbid} → txnid
-    // txdat 到来时使用 txdat.txnid = dbid
-    MstKey dbid_key = {mst_idx, dbid};
-    dbid_to_txnid_[dbid_key].push_back(txn_id);
+    // 建立阶段2索引: {mst_idx, dbid, srcid} → write_id
+    DbidKey dbid_key = {mst_idx, dbid, srcid};
+    auto& fifo = dbid_to_wid_[dbid_key];
+    for (const auto& existing : fifo) {
+        if (existing == wid) {
+            LOG_ERROR("[CHI MGR] WARN: duplicate write_id=" << wid
+                      << " in dbid FIFO for mst=" << get_mst_name(mst_idx)
+                      << " dbid=" << std::hex << dbid << " srcid=" << srcid << "\n");
+            set_error();
+        }
+    }
+    fifo.push_back(wid);
+
+    // 释放 txnid 索引，允许 CHI 协议合法复用 txnid
+    txnid_to_wid_.erase(tid_it);
+
+    LOG_DEBUG("[CHI MGR] DBIDResp: mst=" << get_mst_name(mst_idx)
+              << " txnid=" << std::hex << txn_id
+              << " dbid=" << dbid << " srcid=" << srcid
+              << " wid=" << std::dec << wid
+              << " comp=" << it->second.comp_received
+              << " fifo_depth=" << fifo.size() << "\n");
+
+    try_finalize_write(wid);
 }
 
 // ============================================================
 // process_txdat: 由 txdat_flitv 触发 (NCBWrData)
 //   注意：txdat.txnid 字段实际携带的是 dbid！
 //         即 NCBWrData.txnid = DBIDResp.dbid
+//         NCBWrData.tgtid = DBIDResp.srcid  (交叉校验)
 //   dataid 编码: 0/2/4/6 → 对应 cacheline 中的 32B 段偏移
 // ============================================================
 void ChiTransactionManager::process_txdat(uint32_t mst_idx,
@@ -412,7 +480,8 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
                                            uint32_t dataid,
                                            const uint8_t* flit_data,
                                            uint32_t be_mask,
-                                           uint32_t data_cnt)
+                                           uint32_t data_cnt,
+                                           uint32_t tgtid)
 {
     // SNP process
     if (chi_is_snp_resp_data_opcode(opcode)) {
@@ -452,35 +521,61 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
         return;
     }
 
-    if (!chi_is_write_data_opcode(opcode)) {
+    if (opcode != 0 && !chi_is_write_data_opcode(opcode)) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(mtx_);
 
-    // 用 (mst_idx, dbid) 找回原始 txnid
-    MstKey dbid_key = {mst_idx, txn_id_as_dbid};
-    auto dbid_it = dbid_to_txnid_.find(dbid_key);
-    if (dbid_it == dbid_to_txnid_.end() || dbid_it->second.empty()) {
+    // 用 (mst_idx, dbid, tgtid) 通过阶段2索引查找 write_id
+    // tgtid 应等于 rxrsp.srcid，组成三维匹配
+    DbidKey dbid_key = {mst_idx, txn_id_as_dbid, tgtid};
+    auto dbid_it = dbid_to_wid_.find(dbid_key);
+    if (dbid_it == dbid_to_wid_.end() || dbid_it->second.empty()) {
         LOG_ERROR("[CHI MGR] ERROR: txdat cannot find dbid mapping "
-                  << "mst=" << get_mst_name(mst_idx) << " dbid=" << txn_id_as_dbid << "\n");
+                  << "mst=" << get_mst_name(mst_idx)
+                  << " dbid=" << std::hex << txn_id_as_dbid
+                  << " tgtid=" << tgtid << std::dec << "\n");
         dump_outstanding_writes(mst_idx);
+        dump_dbid_map();
         set_error();
         return;
     }
 
-    uint32_t orig_txnid = dbid_it->second.front();
-    MstKey orig_key = {mst_idx, orig_txnid};
-    auto req_it = outstanding_writes_.find(orig_key);
+    uint64_t wid = dbid_it->second.front();
+    auto req_it = outstanding_writes_.find(wid);
     if (req_it == outstanding_writes_.end()) {
         LOG_ERROR("[CHI MGR] ERROR: txdat found dbid map but no write "
-                  << "mst=" << get_mst_name(mst_idx) << " txnid=" << orig_txnid << "\n");
+                  << "mst=" << get_mst_name(mst_idx)
+                  << " write_id=" << std::dec << wid
+                  << " dbid=" << std::hex << txn_id_as_dbid
+                  << " tgtid=" << tgtid
+                  << " fifo_depth=" << std::dec << dbid_it->second.size() << "\n");
+        // 打印 FIFO 内容
+        LOG_ERROR("  FIFO contents for this dbid_key:");
+        for (const auto& fid : dbid_it->second) {
+            LOG_ERROR("    write_id=" << std::dec << fid);
+        }
+        LOG_ERROR("\n");
         dump_outstanding_writes(mst_idx);
+        dump_dbid_map();
         set_error();
         return;
     }
 
     ChiOutstandingWrite& req = req_it->second;
+    uint32_t orig_txnid = req.key.txn_id;
+
+    LOG_DEBUG("[CHI MGR] txdat: mst=" << get_mst_name(mst_idx)
+              << " dbid=" << std::hex << txn_id_as_dbid
+              << " tgtid=" << tgtid
+              << " orig_txnid=" << orig_txnid
+              << " wid=" << std::dec << wid
+              << " dataid=" << dataid
+              << " data_cnt=" << data_cnt
+              << " acc=" << req.accumulated_flits
+              << "/" << req.expected_flits
+              << " addr=0x" << std::hex << req.addr << "\n");
 
     // SM 写事务：收到首笔 txdat 时，用 data_cnt 覆盖 expected_flits
     /*
@@ -522,21 +617,33 @@ void ChiTransactionManager::process_txdat(uint32_t mst_idx,
     // 检查是否收齐所有 flit
     if (req.accumulated_flits >= req.expected_flits) {
         req.data_complete = true;
-        
-        // When all data is collected, the dbid mapping is released
-        // In case latter trans using the same dbid, and the head of FIFO is still the old one
+
+        // FIFO 一致性断言：pop 前验证 front 与当前 write_id 匹配
+        if (dbid_it->second.front() != wid) {
+            LOG_ERROR("[CHI MGR] ASSERT FAIL: FIFO front (wid=" << dbid_it->second.front()
+                      << ") != current wid (" << wid << ") at pop time\n");
+            set_error();
+        }
+
+        // 数据收集完毕，释放 dbid 映射
         dbid_it->second.pop_front();
         if (dbid_it->second.empty()) {
-            dbid_to_txnid_.erase(dbid_it);
+            dbid_to_wid_.erase(dbid_it);
         }
-        
-        try_finalize_write(req_it);
+
+        LOG_DEBUG("[CHI MGR] txdat data_complete: mst=" << get_mst_name(mst_idx)
+                  << " txnid=" << std::hex << orig_txnid
+                  << " dbid=" << txn_id_as_dbid
+                  << " wid=" << std::dec << wid
+                  << " comp=" << req.comp_received << "\n");
+
+        try_finalize_write(wid);
     }
 }
 
-void ChiTransactionManager::try_finalize_write(
-    std::unordered_map<MstKey, ChiOutstandingWrite>::iterator it
-) {
+void ChiTransactionManager::try_finalize_write(uint64_t write_id) {
+    auto it = outstanding_writes_.find(write_id);
+    if (it == outstanding_writes_.end()) return;
     ChiOutstandingWrite& req = it->second;
 
     if (!req.data_complete || !req.comp_received) {
@@ -584,12 +691,10 @@ void ChiTransactionManager::process_rxdat(uint32_t mst_idx,
         return;
     }
 
-    uint32_t mask = be_mask;
     for (uint32_t i = 0; i < 32; ++i) {
         uint32_t idx = byte_offset + i;
         req.data_buf[idx] = flit_data[i];
-        req.be_buf  [idx] = mask & 0x1;
-        mask >>= 1;
+        req.be_buf  [idx] = true; // 读的数据全 BE 有效
     }
     req.accumulated_flits++;
 
@@ -649,15 +754,116 @@ void ChiTransactionManager::dump_outstanding_writes(uint32_t target_mst_idx) con
     
     for (const auto& kv : outstanding_writes_) {
         const auto& req = kv.second;
-        LOG_ERROR("     - mst=" << get_mst_name(req.key.mst_idx)
-                    << " txnid=" << req.key.txn_id 
+        LOG_ERROR("     - wid=" << std::dec << req.write_id
+                    << " mst=" << get_mst_name(req.key.mst_idx)
+                    << " txnid=" << std::hex << req.key.txn_id 
                     << " addr=0x" << std::hex << req.addr << std::dec
                     << " opcode=0x" << std::hex << req.opcode << std::dec
-                    << " dbid_valid=0x" << req.dbid_valid
-                    << " dbid=" << req.dbid
+                    << " is_sm=" << req.is_sm
+                    << " secvec=0x" << std::hex << req.secvec << std::dec
+                    << " dbid_valid=" << req.dbid_valid
+                    << " dbid=" << std::hex << req.dbid
+                    << " srcid=" << req.srcid << std::dec
+                    << " comp=" << req.comp_received
+                    << " data_complete=" << req.data_complete
                     << " exp_flits=" << req.expected_flits
-                    << " acc_flits=" << req.accumulated_flits << "\n");
+                    << " acc_flits=" << req.accumulated_flits
+                    << " data_cnt_applied=" << req.data_cnt_applied << "\n");
     }
 }
 
+// ============================================================
+// dump_dbid_map: 打印 dbid_to_wid_ FIFO 全量内容
+// ============================================================
+void ChiTransactionManager::dump_dbid_map() const
+{
+    LOG_ERROR("  [CHI MGR] DBID-to-WriteID map (" << dbid_to_wid_.size() << " entries):\n");
+    if (dbid_to_wid_.empty()) {
+        LOG_ERROR("     (empty)\n");
+        return;
+    }
+    for (const auto& kv : dbid_to_wid_) {
+        const auto& dkey = kv.first;
+        const auto& fifo = kv.second;
+        LOG_ERROR("     - mst=" << get_mst_name(dkey.mst_idx)
+                  << " dbid=" << std::hex << dkey.dbid
+                  << " srcid=" << dkey.srcid << std::dec
+                  << " fifo[" << fifo.size() << "]=");
+        for (size_t i = 0; i < fifo.size(); ++i) {
+            LOG_ERROR(std::dec << fifo[i]);
+            if (i + 1 < fifo.size()) LOG_ERROR(",");
+        }
+        LOG_ERROR("\n");
+    }
+}
 
+// ============================================================
+// dump_all_state: 全量状态转储（可由 DPI 侧随时调用）
+// ============================================================
+void ChiTransactionManager::dump_all_state() const
+{
+    LOG_ERROR("\n======== [CHI MGR] FULL STATE DUMP ========\n");
+    
+    // Outstanding writes
+    LOG_ERROR("  [Writes] count=" << outstanding_writes_.size() << "\n");
+    for (const auto& kv : outstanding_writes_) {
+        const auto& req = kv.second;
+        LOG_ERROR("     - wid=" << std::dec << req.write_id
+                  << " mst=" << get_mst_name(req.key.mst_idx)
+                  << " txnid=" << std::hex << req.key.txn_id
+                  << " addr=0x" << req.addr << std::dec
+                  << " is_sm=" << req.is_sm
+                  << " secvec=0x" << std::hex << req.secvec << std::dec
+                  << " dbid_valid=" << req.dbid_valid
+                  << " dbid=" << std::hex << req.dbid
+                  << " srcid=" << req.srcid << std::dec
+                  << " comp=" << req.comp_received
+                  << " data_complete=" << req.data_complete
+                  << " exp=" << req.expected_flits
+                  << " acc=" << req.accumulated_flits << "\n");
+    }
+
+    // TxnID index
+    LOG_ERROR("  [TxnID Index] count=" << txnid_to_wid_.size() << "\n");
+    for (const auto& kv : txnid_to_wid_) {
+        LOG_ERROR("     - mst=" << get_mst_name(kv.first.mst_idx)
+                  << " txnid=" << std::hex << kv.first.txn_id
+                  << " -> wid=" << std::dec << kv.second << "\n");
+    }
+    
+    // Outstanding reads
+    LOG_ERROR("  [Reads] count=" << outstanding_reads_.size() << "\n");
+    for (const auto& kv : outstanding_reads_) {
+        const auto& req = kv.second;
+        LOG_ERROR("     - mst=" << get_mst_name(req.key.mst_idx)
+                  << " txnid=" << std::hex << req.key.txn_id
+                  << " addr=0x" << req.addr << std::dec
+                  << " exp=" << req.expected_flits
+                  << " acc=" << req.accumulated_flits << "\n");
+    }
+    
+    // Outstanding dataless
+    LOG_ERROR("  [Dataless] count=" << outstanding_dataless_.size() << "\n");
+    for (const auto& kv : outstanding_dataless_) {
+        const auto& req = kv.second;
+        LOG_ERROR("     - mst=" << get_mst_name(req.key.mst_idx)
+                  << " txnid=" << std::hex << req.key.txn_id
+                  << " addr=0x" << req.addr << std::dec << "\n");
+    }
+    
+    // Outstanding snoops
+    LOG_ERROR("  [Snoops] count=" << outstanding_snoops_.size() << "\n");
+    for (const auto& kv : outstanding_snoops_) {
+        const auto& req = kv.second;
+        LOG_ERROR("     - mst=" << get_mst_name(req.key.mst_idx)
+                  << " txnid=" << std::hex << req.key.txn_id
+                  << " addr=0x" << req.addr << std::dec
+                  << " exp=" << req.expected_flits
+                  << " acc=" << req.accumulated_flits << "\n");
+    }
+    
+    // DBID map
+    dump_dbid_map();
+    
+    LOG_ERROR("======== [CHI MGR] END STATE DUMP ========\n\n");
+}

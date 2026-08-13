@@ -92,12 +92,12 @@ static void do_write(ChiTransactionManager& mgr,
 
     printf("  [TEST_DEBUG] do_write: calling process_rxrsp_dbid(mst=%u, txnid=%u, dbid=%u)...\n",
            mst, txnid, dbid);
-    mgr.process_rxrsp_dbid(mst, txnid, 0, dbid);
+    mgr.process_rxrsp_dbid(mst, txnid, 0, dbid, /*srcid=*/0);
 
     printf("  [TEST_DEBUG] do_write: calling process_txdat(mst=%u, dbid=%u, fill=0x%02x)...\n",
            mst, dbid, fill);
     auto wd = make_flit(fill);
-    mgr.process_txdat(mst, dbid, 0, 0, wd.data(), 0xFFFFFFFF, 0);
+    mgr.process_txdat(mst, dbid, 0, 0, wd.data(), 0xFFFFFFFF, 0, /*tgtid=*/0);
     printf("  [TEST_DEBUG] do_write completed.\n");
 }
 
